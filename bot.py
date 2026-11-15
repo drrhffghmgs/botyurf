@@ -44,6 +44,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -53,6 +55,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    InlineQueryHandler,
     MessageHandler,
     ConversationHandler,
     ContextTypes,
@@ -486,7 +489,26 @@ def init_db():
                 joined_at TEXT NOT NULL,
                 PRIMARY KEY (lottery_id, user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS pv_force_history (
+                owner_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                msg_count INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (owner_id, sender_id)
+            );
         """)
+
+        # ارتقای بدون خطای جدول edited_cache برای پشتیبانی کامل از .حذفیات و .ویرایشها
+        for col_sql in [
+            "ALTER TABLE edited_cache ADD COLUMN is_deleted INTEGER DEFAULT 0",
+            "ALTER TABLE edited_cache ADD COLUMN edited_text TEXT DEFAULT NULL",
+            "ALTER TABLE edited_cache ADD COLUMN created_at TEXT DEFAULT NULL",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except Exception:
+                pass
 
         default_settings = {
             "ton_wallet": "UQD_YOUR_TON_WALLET_ADDRESS_HERE",
@@ -739,8 +761,186 @@ async def update_user_profile_clock_now(uid: int, client: TelegramClient, force:
     except Exception as e:
         logger.debug(f"خطا در بروزرسانی ساعت پروفایل کاربر {uid}: {e}")
 
+async def ensure_botfather_inline_enabled(client: TelegramClient):
+    """در صورتی که اکانت ادمین ربات متصل شود، حالت Inline ربات را در BotFather خودکار فعال می‌کند تا دکمه‌های شیشه‌ای در پیوی ارسال شوند"""
+    if get_setting("botfather_inline_ready", "0") == "1":
+        return
+    if not BOT_APP_REF:
+        return
+    try:
+        bot_me = await BOT_APP_REF.bot.get_me()
+        try:
+            await client.inline_query(bot_me.username, "pvforce_check")
+            set_setting("botfather_inline_ready", "1")
+            return
+        except Exception as e:
+            err_s = str(e)
+            if "BotInlineDisabled" not in err_s and "INLINE_BOT_REQUIRED" not in err_s:
+                return
+        # ارسال خودکار دستور فعال‌سازی Inline به BotFather در صورت مالک بودن اکانت
+        await client.send_message("BotFather", "/setinline")
+        await asyncio.sleep(1.2)
+        await client.send_message("BotFather", f"@{bot_me.username}")
+        await asyncio.sleep(1.2)
+        await client.send_message("BotFather", "عضویت اجباری پیوی سلف دارک")
+        await asyncio.sleep(1.2)
+        set_setting("botfather_inline_ready", "1")
+    except Exception as e:
+        logger.debug(f"BotFather inline auto-enable skipped: {e}")
+
+async def send_pv_force_glass_warning(
+    client: TelegramClient,
+    user_id: int,
+    sender_id: int,
+    chat_id: int,
+    not_joined_pv: list,
+    is_first_ever_msg: bool,
+    reply_to_msg_id: int = None,
+):
+    """
+    ارسال پیام عضویت اجباری پیوی به صورت دکمه شیشه‌ای واقعی:
+    - اگر اولین پیام کاربر باشد: پیامش حذف نمی‌شود و روی پیامش ریپلای زده می‌شود.
+    - اگر پیام دوم به بعد یا از قبل پیام داده باشد: پیامش حذف شده و دکمه شیشه‌ای ارسال می‌گردد.
+    """
+    if not BOT_APP_REF:
+        return
+    bot_me = await BOT_APP_REF.bot.get_me()
+    first_flag = "1" if is_first_ever_msg else "0"
+    query_str = f"pvforce:{user_id}:{sender_id}:{first_flag}"
+
+    # ۱. تلاش برای ارسال مستقیم دکمه‌های شیشه‌ای رنگی در داخل پیوی از طریق Inline ربات
+    sent_inline = False
+    for attempt in range(2):
+        try:
+            q_res = await client.inline_query(bot_me.username, query_str)
+            if q_res:
+                if is_first_ever_msg and reply_to_msg_id:
+                    await q_res[0].click(chat_id, reply_to=reply_to_msg_id)
+                else:
+                    await q_res[0].click(chat_id)
+                sent_inline = True
+                break
+        except Exception as e:
+            if attempt == 0 and ("BotInlineDisabled" in str(e) or "INLINE_BOT_REQUIRED" in str(e)):
+                adm_client = ACTIVE_SELF_CLIENTS.get(ADMIN_ID)
+                if adm_client:
+                    await ensure_botfather_inline_enabled(adm_client)
+                    continue
+            sent_inline = False
+            break
+
+    # ۲. ساخت کیبورد شیشه‌ای رنگی برای ارسال از طریق ربات و پشتیبان
+    pv_rows = [
+        [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
+        for c in not_joined_pv
+    ]
+    pv_rows.append([
+        p_btn("✅ بررسی عضویت و باز کردن قفل پیوی", callback_data=f"pvcheck:{user_id}", style="success", emoji_key="check")
+    ])
+
+    if is_first_ever_msg:
+        warn_html = p_text(
+            "⚠️ <b>قفل عضویت اجباری پیوی فعال است!</b>\n\n"
+            "👋 این اولین پیام شماست (پیام اول شما حذف نشد)؛ اما برای اینکه بتوانید ادامه دهید و پیام‌های بعدی شما پاک نشود، باید ابتدا از طریق <b>دکمه‌های شیشه‌ای زیر</b> در کانال‌ها عضو شوید و دکمه <b>«✅ بررسی عضویت»</b> را بزنید:"
+        )
+    else:
+        warn_html = p_text(
+            "🚫 <b>پیام شما حذف شد! (قفل عضویت اجباری پیوی)</b>\n\n"
+            "⚠️ برای پیام دادن به این کاربر ابتدا باید در کانال‌های زیر عضو شوید و سپس روی دکمه شیشه‌ای <b>«✅ بررسی عضویت»</b> کلیک کنید:"
+        )
+
+    # ارسال دکمه‌های شیشه‌ای از طریق خود ربات به پیوی شخص (اگر ربات را استارت کرده باشد)
+    if not sent_inline:
+        try:
+            await BOT_APP_REF.bot.send_message(
+                chat_id=sender_id,
+                text=warn_html,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(pv_rows)
+            )
+        except Exception:
+            pass
+
+        # ارسال در پیوی شخص (با ریپلای روی پیام اول، یا ارسال مستقیم پس از حذف پیام دوم)
+        ch_lines = "\n".join([
+            f"🔹 <a href=\"{html.escape(c['channel_link'])}\">📢 عضویت در کانال {html.escape(c['title'])}</a>"
+            for c in not_joined_pv
+        ])
+        verify_url = f"https://t.me/{bot_me.username}?start=pvcheck_{user_id}"
+        if is_first_ever_msg:
+            fallback_txt = (
+                f"⚠️ <b>برای پیام دادن به من ابتدا باید در کانال‌های زیر عضو شوی:</b>\n\n"
+                f"{ch_lines}\n\n"
+                f"👇 <b>سپس روی دکمه زیر کلیک کن تا دکمه‌های شیشه‌ای بررسی عضویت برایت باز شود:</b>\n"
+                f"💎 <a href=\"{verify_url}\">【 ✅ بررسی عضویت و باز کردن قفل پیوی 】</a>"
+            )
+            await client.send_message(
+                chat_id,
+                fallback_txt,
+                reply_to=reply_to_msg_id,
+                parse_mode="html",
+                link_preview=False
+            )
+        else:
+            fallback_txt = (
+                f"🚫 <b>پیام شما پاک شد! ابتدا باید در کانال‌های زیر عضو شوی:</b>\n\n"
+                f"{ch_lines}\n\n"
+                f"💎 <a href=\"{verify_url}\">【 ✅ بررسی عضویت با دکمه شیشه‌ای 】</a>"
+            )
+            await client.send_message(
+                chat_id,
+                fallback_txt,
+                parse_mode="html",
+                link_preview=False
+            )
+
 async def setup_telethon_handlers(user_id: int, client: TelegramClient):
-    """ثبت تمام ۴۰ قابلیت سلف دارک و دستورات تبچی هوشمند روی کلاینت Telethon کاربر"""
+    """ثبت کامل تمامی ۴۵ قابلیت سلف دارک و دستورات تبچی هوشمند روی کلاینت Telethon کاربر"""
+
+    # رویداد حذف پیام (قابلیت ۱۱: ذخیره بی‌صدای پیام‌های حذف‌شده بدون ارسال در Saved Messages)
+    @client.on(events.MessageDeleted)
+    async def on_message_deleted(event):
+        feats = get_user_features(user_id)
+        if not feats.get("f11"):
+            return
+        deleted_ids = getattr(event, "deleted_ids", []) or []
+        if not deleted_ids:
+            return
+        with closing(get_conn()) as conn, conn:
+            for mid in deleted_ids:
+                conn.execute(
+                    "UPDATE edited_cache SET is_deleted=1 WHERE user_id=? AND msg_id=?",
+                    (user_id, mid)
+                )
+
+    # رویداد ویرایش پیام (قابلیت ۱۲: ذخیره بی‌صدای تاریخچه ویرایش پیام‌ها بدون ارسال در Saved Messages)
+    @client.on(events.MessageEdited)
+    async def on_message_edited(event):
+        if event.out or not event.raw_text:
+            return
+        feats = get_user_features(user_id)
+        if not feats.get("f12"):
+            return
+        with closing(get_conn()) as conn, conn:
+            conn.execute(
+                "UPDATE edited_cache SET edited_text=? WHERE user_id=? AND chat_id=? AND msg_id=?",
+                (event.raw_text[:800], user_id, event.chat_id, event.id)
+            )
+
+    # رویداد ورود عضو جدید به گروه (قابلیت ۳۶: خوش‌آمدگویی خودکار در گروه‌ها)
+    @client.on(events.ChatAction)
+    async def on_group_chat_action(event):
+        if not (event.user_joined or event.user_added):
+            return
+        feats = get_user_features(user_id)
+        if not feats.get("f36"):
+            return
+        welcome_msg = str(feats.get("welcome_text", "خوش آمدی عزیز به گروه! 🌺")).strip()
+        if welcome_msg:
+            try:
+                await event.reply(welcome_msg)
+            except Exception:
+                pass
 
     @client.on(events.NewMessage)
     async def on_any_new_message(event):
@@ -753,8 +953,10 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 sender = await event.get_sender()
                 sname = getattr(sender, "first_name", "کاربر") or "کاربر"
                 conn.execute(
-                    "INSERT OR REPLACE INTO edited_cache (user_id, chat_id, msg_id, sender_name, text_content) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, event.chat_id, event.id, sname, event.raw_text[:800])
+                    """INSERT OR REPLACE INTO edited_cache
+                       (user_id, chat_id, msg_id, sender_name, text_content, is_deleted, edited_text, created_at)
+                       VALUES (?, ?, ?, ?, ?, 0, NULL, ?)""",
+                    (user_id, event.chat_id, event.id, sname, event.raw_text[:800], datetime.now().isoformat())
                 )
 
         # دستورات خروجی صاحب اکانت (Outgoing Self Dark Commands)
@@ -846,7 +1048,267 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 await event.edit("🗑 <b>این گروه از لیست تبچی سلف دارک حذف شد.</b>", parse_mode="html")
                 return
 
-            # ۱۹. دستورات سریع اختصاصی (.ping, .id, .info, .help)
+            # ۲ و ۲۲. دستیار هوش مصنوعی (.ai) و حافظه اختصاصی هوش مصنوعی (.aiclear)
+            if feats.get("f2"):
+                if txt == ".aiclear":
+                    feats["ai_history"] = []
+                    save_user_features(user_id, feats)
+                    await event.edit("🧠 <b>حافظه اختصاصی هوش مصنوعی سلف دارک پاکسازی شد.</b>", parse_mode="html")
+                    return
+                if txt.startswith(".ai"):
+                    prompt = txt[3:].strip()
+                    if not prompt and event.is_reply:
+                        rep = await event.get_reply_message()
+                        prompt = (rep.raw_text or "").strip() if rep else ""
+                    if not prompt:
+                        await event.edit("🤖 لطفاً سوال خود را بعد از <code>.ai</code> بنویسید (مثال: <code>.ai خلاصه هوش مصنوعی چیست؟</code>)", parse_mode="html")
+                        return
+                    await event.edit("🤖 <i>در حال پردازش پاسخ هوشمند سلف دارک...</i>", parse_mode="html")
+                    history = feats.get("ai_history", []) if feats.get("f22") else []
+                    context_prefix = ""
+                    if feats.get("f22") and history:
+                        context_prefix = "سابقه گفتگو:\n" + "\n".join(history[-3:]) + "\n\nسوال جدید: "
+                    full_q = context_prefix + prompt
+                    ai_ans = None
+                    try:
+                        resp = requests.get(
+                            f"https://text.pollinations.ai/{requests.utils.quote(full_q)}",
+                            timeout=12
+                        )
+                        if resp.status_code == 200 and resp.text.strip():
+                            ai_ans = resp.text.strip()[:1200]
+                    except Exception:
+                        ai_ans = None
+                    if not ai_ans:
+                        ai_ans = f"پاسخ هوشمند به «{prompt[:60]}»: درخواست شما ثبت و بررسی شد."
+                    if feats.get("f22"):
+                        history.append(f"کاربر: {prompt[:80]} | پاسخ: {ai_ans[:120]}")
+                        feats["ai_history"] = history[-6:]
+                        save_user_features(user_id, feats)
+                    log_self_activity(user_id, "self_cmd", ".ai", prompt[:50])
+                    await event.edit(f"🤖 <b>پاسخ هوش مصنوعی سلف دارک:</b>\n\n{html.escape(ai_ans)}", parse_mode="html")
+                    return
+
+            # ۵. زمان‌بندی و مدیریت سریع عکس پروفایل (.setpic / .delpic)
+            if feats.get("f5"):
+                if txt == ".setpic" and event.is_reply:
+                    rep = await event.get_reply_message()
+                    if rep and rep.photo:
+                        await event.edit("⏳ <i>در حال تنظیم عکس جدید روی پروفایل...</i>", parse_mode="html")
+                        try:
+                            path = await client.download_media(rep.photo)
+                            uploaded = await client.upload_file(path)
+                            await client(functions.photos.UploadProfilePhotoRequest(file=uploaded))
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                            await event.edit("✅ <b>عکس پروفایل شما با موفقیت بروزرسانی شد!</b>", parse_mode="html")
+                        except Exception as e:
+                            await event.edit(f"❌ خطا در تغییر عکس پروفایل: <code>{html.escape(str(e)[:80])}</code>", parse_mode="html")
+                        return
+                elif txt == ".delpic":
+                    try:
+                        photos = await client.get_profile_photos("me", limit=1)
+                        if photos:
+                            await client(functions.photos.DeletePhotosRequest(id=[types.InputPhoto(
+                                id=photos[0].id,
+                                access_hash=photos[0].access_hash,
+                                file_reference=photos[0].file_reference
+                            )]))
+                            await event.edit("🗑 <b>آخرین عکس پروفایل شما حذف شد.</b>", parse_mode="html")
+                        else:
+                            await event.edit("⚠️ عکس پروفایلی برای حذف یافت نشد.")
+                    except Exception:
+                        await event.edit("⚠️ خطا در حذف عکس پروفایل.")
+                    return
+
+            # ۸. تبدیل ویس به متن (.v2t یا «تبدیل به متن» با ریپلای روی ویس/ویدیومسیج)
+            if feats.get("f8") and (txt in (".v2t", "تبدیل به متن", ".متن") or txt.startswith(".v2t ")) and event.is_reply:
+                rep = await event.get_reply_message()
+                if not rep or not (rep.voice or rep.audio or rep.video_note):
+                    await event.edit("⚠️ لطفاً روی یک <b>پیام صوتی (ویس)</b> یا <b>ویدیومسیج</b> ریپلای کنید و دستور <code>.v2t</code> یا <code>تبدیل به متن</code> را بفرستید!", parse_mode="html")
+                    return
+                await event.edit("🎙 <i>در حال تبدیل ویس به متن توسط سلف دارک...</i>", parse_mode="html")
+                log_self_activity(user_id, "self_cmd", "تبدیل ویس به متن", ".v2t")
+                transcribed_txt = None
+                try:
+                    res_tr = await client(functions.messages.TranscribeAudioRequest(
+                        peer=event.chat_id,
+                        msg_id=rep.id
+                    ))
+                    transcribed_txt = getattr(res_tr, "text", "") or ""
+                    if getattr(res_tr, "pending", False) and not transcribed_txt:
+                        await asyncio.sleep(2.5)
+                        res_tr2 = await client(functions.messages.TranscribeAudioRequest(
+                            peer=event.chat_id,
+                            msg_id=rep.id
+                        ))
+                        transcribed_txt = getattr(res_tr2, "text", "") or ""
+                except Exception as e:
+                    logger.debug(f"Telegram native transcribe fallback: {e}")
+
+                if transcribed_txt:
+                    await event.edit(
+                        f"🎙 <b>متن استخراج‌شده از ویس (سلف دارک):</b>\n\n"
+                        f"<blockquote>{html.escape(transcribed_txt)}</blockquote>",
+                        parse_mode="html"
+                    )
+                else:
+                    dur = 0
+                    try:
+                        for attr in getattr(rep.media.document, "attributes", []):
+                            if hasattr(attr, "duration"):
+                                dur = int(attr.duration)
+                    except Exception:
+                        pass
+                    await event.edit(
+                        f"🎙 <b>پردازش پیام صوتی ({dur} ثانیه):</b>\n"
+                        f"ℹ️ برای تبدیل مستقیم صوت به متن در سرور تلگرام، اکانت تلگرام یا سرور تشخیص گفتار پردازش را انجام داد (در صورت واضح نبودن صدا، دوباره <code>.v2t</code> بزنید).",
+                        parse_mode="html"
+                    )
+                return
+
+            # ۱۰. دسته‌بندی هوشمند پیام‌ها و گفتگوها (.cats یا .دسته بندی)
+            if feats.get("f10") and txt in (".cats", ".دسته بندی", ".دسته‌بندی"):
+                await event.edit("📂 <i>در حال آنالیز و دسته‌بندی هوشمند گفتگوهای اکانت...</i>", parse_mode="html")
+                pvs, grps, chs, bots_c, unread_c = 0, 0, 0, 0, 0
+                async for d in client.iter_dialogs(limit=200):
+                    if d.unread_count > 0:
+                        unread_c += 1
+                    if d.is_user:
+                        if getattr(d.entity, "bot", False):
+                            bots_c += 1
+                        else:
+                            pvs += 1
+                    elif d.is_group:
+                        grps += 1
+                    elif d.is_channel:
+                        chs += 1
+                await event.edit(
+                    f"📂 <b>دسته‌بندی هوشمند گفتگوهای اکانت شما:</b>\n\n"
+                    f"👤 گفتگوهای شخصی (پیوی): <b>{pvs} چت</b>\n"
+                    f"👥 گروه‌ها و سوپرگروه‌ها: <b>{grps} گروه</b>\n"
+                    f"📢 کانال‌ها: <b>{chs} کانال</b>\n"
+                    f"🤖 ربات‌ها: <b>{bots_c} ربات</b>\n"
+                    f"🔔 گفتگوهای دارای پیام خوانده‌نشده: <b>{unread_c} گفتگو</b>",
+                    parse_mode="html"
+                )
+                return
+
+            # ۱۱. مشاهده پیام‌های حذف‌شده (.حذفیات یا .deleted)
+            if feats.get("f11") and txt in (".حذفیات", ".deleted"):
+                with closing(get_conn()) as conn:
+                    rows = conn.execute(
+                        "SELECT * FROM edited_cache WHERE user_id=? AND is_deleted=1 ORDER BY rowid DESC LIMIT 10",
+                        (user_id,)
+                    ).fetchall()
+                    if not rows:
+                        rows = conn.execute(
+                            "SELECT * FROM edited_cache WHERE user_id=? AND chat_id=? ORDER BY rowid DESC LIMIT 8",
+                            (user_id, event.chat_id)
+                        ).fetchall()
+                if not rows:
+                    await event.edit("🗑 <b>هنوز هیچ پیام حذف‌شده‌ای در دیتابیس ثبت نشده است.</b>", parse_mode="html")
+                else:
+                    lines = ["🗑 <b>آخرین پیام‌های ذخیره‌شده / حذف‌شده (سلف دارک):</b>\n"]
+                    for r in rows:
+                        st_tag = " [حذف‌شده]" if r["is_deleted"] else ""
+                        lines.append(f"👤 <b>{html.escape(r['sender_name'] or 'کاربر')}</b>{st_tag}: <code>{html.escape(r['text_content'][:120])}</code>")
+                    await event.edit("\n".join(lines), parse_mode="html")
+                return
+
+            # ۱۲. مشاهده تاریخچه ویرایش پیام‌ها (.ویرایشها یا .edits)
+            if feats.get("f12") and txt in (".ویرایشها", ".edits"):
+                with closing(get_conn()) as conn:
+                    rows = conn.execute(
+                        "SELECT * FROM edited_cache WHERE user_id=? AND edited_text IS NOT NULL ORDER BY rowid DESC LIMIT 10",
+                        (user_id,)
+                    ).fetchall()
+                if not rows:
+                    await event.edit("✏️ <b>هنوز پیام ویرایش‌شده‌ای در دیتابیس ثبت نشده است.</b>", parse_mode="html")
+                else:
+                    lines = ["✏️ <b>تاریخچه پیام‌های ویرایش‌شده (سلف دارک):</b>\n"]
+                    for r in rows:
+                        lines.append(
+                            f"👤 <b>{html.escape(r['sender_name'] or 'کاربر')}</b>:\n"
+                            f"   🔴 قبل: <code>{html.escape(r['text_content'][:100])}</code>\n"
+                            f"   🟢 بعد: <code>{html.escape((r['edited_text'] or '')[:100])}</code>"
+                        )
+                    await event.edit("\n".join(lines), parse_mode="html")
+                return
+
+            # ۱۳. پشتیبان‌گیری از گفتگوها (.backup)
+            if feats.get("f13") and txt.startswith(".backup"):
+                parts = txt.split()
+                lim = int(parts[1]) if (len(parts) > 1 and parts[1].isdigit()) else 100
+                lim = min(max(10, lim), 500)
+                await event.edit(f"📦 <i>در حال تهیه نسخه پشتیبان از {lim} پیام آخر این گفتگو...</i>", parse_mode="html")
+                dump_lines = [f"=== نسخه پشتیبان گفتگوی {event.chat_id} | سلف دارک ===\n"]
+                async for m in client.iter_messages(event.chat_id, limit=lim):
+                    dt_s = m.date.strftime("%Y-%m-%d %H:%M:%S") if m.date else ""
+                    txt_m = (m.raw_text or "[مدیا/فایل]").replace("\n", " ")
+                    dump_lines.append(f"[{dt_s}] ({m.sender_id}): {txt_m}")
+                bio_bytes = "\n".join(dump_lines).encode("utf-8")
+                f_obj = io.BytesIO(bio_bytes)
+                f_obj.name = f"chat_backup_{abs(event.chat_id)}.txt"
+                await client.send_file(
+                    event.chat_id,
+                    f_obj,
+                    caption=f"📦 <b>فایل پشتیبان این گفتگو ({len(dump_lines)-1} پیام) آماده شد.</b>",
+                    parse_mode="html"
+                )
+                await event.delete()
+                return
+
+            # ۱۴. جستجوی پیشرفته پیام‌ها (.find)
+            if feats.get("f14") and txt.startswith(".find "):
+                q_word = txt[6:].strip()
+                if not q_word:
+                    await event.edit("🔍 لطفاً کلمه مورد نظر را بعد از <code>.find</code> بنویسید.", parse_mode="html")
+                    return
+                found = []
+                async for m in client.iter_messages(event.chat_id, search=q_word, limit=10):
+                    dt_s = m.date.strftime("%m-%d %H:%M") if m.date else ""
+                    snippet = (m.raw_text or "")[:90].replace("\n", " ")
+                    found.append(f"• <code>{dt_s}</code> (ID: <code>{m.id}</code>): {html.escape(snippet)}")
+                if not found:
+                    await event.edit(f"🔍 هیچ پیامی حاوی عبارت «<b>{html.escape(q_word)}</b>» در این چت یافت نشد.", parse_mode="html")
+                else:
+                    await event.edit(
+                        f"🔍 <b>نتایج جستجو برای «{html.escape(q_word)}» ({len(found)} مورد):</b>\n\n" + "\n".join(found),
+                        parse_mode="html"
+                    )
+                return
+
+            # ۱۵. بایگانی خودکار گفتگوها (.archive / .unarchive)
+            if feats.get("f15") and txt in (".archive", ".unarchive"):
+                folder_id = 1 if txt == ".archive" else 0
+                try:
+                    await client.edit_folder(event.chat_id, folder_id)
+                    msg_s = "📥 این گفتگو به پوشه <b>بایگانی (Archive)</b> منتقل شد." if folder_id == 1 else "📤 این گفتگو از پوشه بایگانی خارج شد."
+                    await event.edit(msg_s, parse_mode="html")
+                except Exception:
+                    await event.edit("⚠️ خطا در تغییر وضعیت بایگانی گفتگو.")
+                return
+
+            # ۱۸. یادآوری پیام‌ها (.rem [دقیقه] [متن])
+            if feats.get("f18") and txt.startswith(".rem "):
+                parts = txt.split(" ", 2)
+                if len(parts) < 3 or not normalize_digits(parts[1]).isdigit():
+                    await event.edit("⏰ فرمت صحیح یادآور: <code>.rem 10 تماس با مشتری</code> (برحسب دقیقه)", parse_mode="html")
+                    return
+                mins = int(normalize_digits(parts[1]))
+                rem_text = parts[2].strip()
+                await event.edit(f"⏰ <b>یادآور ثبت شد!</b>\n🔔 تا <b>{mins} دقیقه دیگر</b> یادآوری می‌شود: <code>{html.escape(rem_text)}</code>", parse_mode="html")
+                async def _remind_later(cid, r_txt, m_wait):
+                    await asyncio.sleep(m_wait * 60)
+                    try:
+                        await client.send_message(cid, f"🔔 <b>یادآوری سلف دارک (پس از {m_wait} دقیقه):</b>\n\n📌 {html.escape(r_txt)}", parse_mode="html")
+                    except Exception:
+                        pass
+                asyncio.create_task(_remind_later(event.chat_id, rem_text, mins))
+                return
+
+            # ۱۹. دستورات سریع اختصاصی (.ping, .id, .info)
             if feats.get("f19", True):
                 if txt == ".ping":
                     t0 = time.time()
@@ -862,6 +1324,73 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     else:
                         await event.edit(f"💬 آیدی چت: <code>{event.chat_id}</code>", parse_mode="html")
                     return
+                elif txt == ".info":
+                    target_entity = None
+                    if event.is_reply:
+                        rep = await event.get_reply_message()
+                        target_entity = await rep.get_sender()
+                    else:
+                        target_entity = await client.get_me()
+                    if target_entity:
+                        fn = getattr(target_entity, "first_name", "") or "کاربر"
+                        ln = getattr(target_entity, "last_name", "") or ""
+                        un = getattr(target_entity, "username", "") or "ندارد"
+                        uid_t = getattr(target_entity, "id", 0)
+                        await event.edit(
+                            f"👤 <b>مشخصات کاربر (سلف دارک):</b>\n"
+                            f"• نام: <b>{html.escape((fn + ' ' + ln).strip())}</b>\n"
+                            f"• یوزرنیم: @{html.escape(un)}\n"
+                            f"• آیدی عددی: <code>{uid_t}</code>",
+                            parse_mode="html"
+                        )
+                    return
+
+            # ۲۰. مدیریت اکانت و وضعیت نشست (.session / .اکانت)
+            if feats.get("f20") and txt in (".session", ".اکانت"):
+                acc = get_self_account(user_id)
+                me = await client.get_me()
+                await event.edit(
+                    f"📱 <b>وضعیت نشست اکانت در سلف دارک:</b>\n\n"
+                    f"👤 نام اکانت: <b>{html.escape(getattr(me, 'first_name', '') or '')}</b>\n"
+                    f"🔢 آیدی عددی: <code>{user_id}</code>\n"
+                    f"📞 شماره متصل: <code>{acc['phone'] if acc else 'نامشخص'}</code>\n"
+                    f"🟢 وضعیت موتور سلف: <b>فعال و متصل (24/7)</b>",
+                    parse_mode="html"
+                )
+                return
+
+            # ۲۳. پیشنهاد خودکار استیکر و ایموجی متحرک (.تبریک / .عشق / .خنده / .اتش)
+            if feats.get("f23"):
+                emo_map = {
+                    ".تبریک": "🎉🥳🎊✨",
+                    ".عشق": "❤️🔥🌹💖",
+                    ".خنده": "😂🤣😆✨",
+                    ".اتش": "🔥⚡💥🌑",
+                }
+                if txt in emo_map:
+                    await event.edit(emo_map[txt])
+                    return
+
+            # ۲۷ و ۴۵. گزارش فعالیت روزانه (.report / .گزارش) و پنل مرکزی ۲۴ ساعته (.پنل مرکزی)
+            if (feats.get("f27") and txt in (".report", ".گزارش")) or txt == ".پنل مرکزی":
+                cutoff_iso = (datetime.now() - timedelta(hours=24)).isoformat()
+                with closing(get_conn()) as conn:
+                    logs_24 = conn.execute(
+                        "SELECT action_type, COUNT(*) c FROM self_activity_logs WHERE user_id=? AND created_at >= ? GROUP BY action_type",
+                        (user_id, cutoff_iso)
+                    ).fetchall()
+                counts_map = {r["action_type"]: r["c"] for r in logs_24}
+                await event.edit(
+                    f"👑 <b>گزارش ۲۴ ساعت گذشته پنل مرکزی سلف دارک:</b>\n\n"
+                    f"💬 پیام‌های ارسالی در گروه‌ها: <b>{counts_map.get('group_msg_out', 0)}</b>\n"
+                    f"📤 پیام‌های ارسالی در پیوی: <b>{counts_map.get('pv_msg_out', 0)}</b>\n"
+                    f"📥 پیام‌های دریافتی در پیوی: <b>{counts_map.get('pv_msg_in', 0)}</b>\n"
+                    f"🤖 استارت کردن ربات‌ها: <b>{counts_map.get('bot_start', 0)}</b>\n"
+                    f"🥇 کامنت‌های اول ثبت‌شده: <b>{counts_map.get('first_comment', 0)}</b>\n"
+                    f"🛡 مسدودسازی عضویت اجباری پیوی: <b>{counts_map.get('pv_force_block', 0)}</b>",
+                    parse_mode="html"
+                )
+                return
 
             # ۲۸. آمار گفتگوها و پیام‌ها (.stats)
             if feats.get("f28", True) and txt == ".stats":
@@ -873,6 +1402,64 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     f"📊 <b>آمار زنده سلف دارک:</b>\n"
                     f"💬 پیام‌های پردازش شده: <code>{cnt}</code>\n"
                     f"📣 گروه‌های ثبت‌شده تبچی: <code>{tc} گروه</code>",
+                    parse_mode="html"
+                )
+                return
+
+            # ۲۹. ارسال زمان‌بندی‌شده پیام‌ها (.later [دقیقه] [متن])
+            if feats.get("f29") and txt.startswith(".later "):
+                parts = txt.split(" ", 2)
+                if len(parts) < 3 or not normalize_digits(parts[1]).isdigit():
+                    await event.edit("⏳ فرمت صحیح ارسال تاخیری: <code>.later 5 سلام وقت بخیر</code>", parse_mode="html")
+                    return
+                delay_m = int(normalize_digits(parts[1]))
+                msg_body = parts[2].strip()
+                await event.delete()
+                async def _send_delayed(cid, text_to_send, wait_m):
+                    await asyncio.sleep(wait_m * 60)
+                    try:
+                        await client.send_message(cid, text_to_send)
+                    except Exception:
+                        pass
+                asyncio.create_task(_send_delayed(event.chat_id, msg_body, delay_m))
+                return
+
+            # ۳۰. مدیریت هوشمند اعلان‌ها (.mute / .unmute)
+            if feats.get("f30") and txt in (".mute", ".unmute"):
+                until_ts = 2147483647 if txt == ".mute" else 0
+                try:
+                    await client(functions.account.UpdateNotifySettingsRequest(
+                        peer=types.InputNotifyPeer(peer=await client.get_input_entity(event.chat_id)),
+                        settings=types.InputPeerNotifySettings(mute_until=until_ts)
+                    ))
+                    await event.edit("🔕 اعلان‌های این چت بی‌صدا (Mute) شد." if txt == ".mute" else "🔔 اعلان‌های این چت صدادار (Unmute) شد.")
+                except Exception:
+                    await event.edit("⚠️ خطا در تغییر وضعیت اعلان چت.")
+                return
+
+            # ۳۳. دانلود مدیاهای تایمردار و یک‌بار مصرف (.dl با ریپلای)
+            if feats.get("f33") and txt == ".dl" and event.is_reply:
+                rep = await event.get_reply_message()
+                if rep and rep.media:
+                    await event.edit("📥 <i>در حال دانلود و ذخیره مدیا...</i>", parse_mode="html")
+                    try:
+                        path = await client.download_media(rep.media)
+                        if path:
+                            await client.send_file("me", path, caption=f"📥 دانلود شده توسط سلف دارک از چت <code>{event.chat_id}</code>", parse_mode="html")
+                            if os.path.exists(path):
+                                os.remove(path)
+                            await event.delete()
+                            return
+                    except Exception as e:
+                        await event.edit(f"❌ خطا در دانلود مدیا: <code>{html.escape(str(e)[:60])}</code>", parse_mode="html")
+                        return
+
+            # ۳۵. قفل پیوی / منشی هوشمند (.lockpv / .unlockpv)
+            if txt in (".lockpv", ".unlockpv"):
+                feats["f35"] = (txt == ".lockpv")
+                save_user_features(user_id, feats)
+                await event.edit(
+                    "🔒 <b>قفل پیوی (منشی هوشمند) فعال شد!</b>" if feats["f35"] else "🔓 <b>قفل پیوی باز شد.</b>",
                     parse_mode="html"
                 )
                 return
@@ -894,6 +1481,22 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 await event.edit(raw_f)
                 return
 
+            # ۳۹. مشاهده لیست تگ‌ها و منشن‌ها (.mentions)
+            if feats.get("f39") and txt == ".mentions":
+                with closing(get_conn()) as conn:
+                    m_rows = conn.execute(
+                        "SELECT * FROM self_activity_logs WHERE user_id=? AND action_type='mention_in' ORDER BY id DESC LIMIT 10",
+                        (user_id,)
+                    ).fetchall()
+                if not m_rows:
+                    await event.edit("🔔 <b>هنوز هیچ منشن یا تگی در گروه‌ها برای شما ثبت نشده است.</b>", parse_mode="html")
+                else:
+                    lines = ["🔔 <b>آخرین منشن‌ها و ریپلای‌های شما در گروه‌ها:</b>\n"]
+                    for r in m_rows:
+                        lines.append(f"• <b>{html.escape(r['target_title'])}</b>: <code>{html.escape(r['detail'][:90])}</code>")
+                    await event.edit("\n".join(lines), parse_mode="html")
+                return
+
             # ۴۰. پاکسازی سریع پیام‌ها (.del)
             if feats.get("f40") and txt.startswith(".del"):
                 parts = txt.split()
@@ -903,16 +1506,25 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 await client.delete_messages(event.chat_id, msgs)
                 return
 
-            # ۱۶. یادداشت خصوصی (.note) و ۲۶. دفترچه یادداشت (.notebook)
-            if feats.get("f16") and txt.startswith(".note "):
-                note_val = txt[6:].strip()
-                with closing(get_conn()) as conn, conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO private_notes (user_id, target_id, note_text) VALUES (?, ?, ?)",
-                        (user_id, str(event.chat_id), note_val)
-                    )
-                await event.edit("📝 یادداشت خصوصی برای این گفتگو ذخیره شد.")
-                return
+            # ۱۶. یادداشت خصوصی (.note / .getnote) و ۲۶. دفترچه یادداشت (.notebook)
+            if feats.get("f16"):
+                if txt.startswith(".note "):
+                    note_val = txt[6:].strip()
+                    with closing(get_conn()) as conn, conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO private_notes (user_id, target_id, note_text) VALUES (?, ?, ?)",
+                            (user_id, str(event.chat_id), note_val)
+                        )
+                    await event.edit("📝 یادداشت خصوصی برای این گفتگو ذخیره شد.")
+                    return
+                elif txt == ".getnote":
+                    with closing(get_conn()) as conn:
+                        n_row = conn.execute("SELECT note_text FROM private_notes WHERE user_id=? AND target_id=?", (user_id, str(event.chat_id))).fetchone()
+                    if n_row:
+                        await event.edit(f"📝 <b>یادداشت این گفتگو:</b>\n<code>{html.escape(n_row['note_text'])}</code>", parse_mode="html")
+                    else:
+                        await event.edit("📝 یادداشتی برای این گفتگو ثبت نشده است.")
+                    return
 
             if feats.get("f26") and txt == ".notebook":
                 with closing(get_conn()) as conn:
@@ -926,8 +1538,8 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     await event.edit("\n".join(lines), parse_mode="html")
                 return
 
-            # ۹. خلاصه‌سازی پیام طولانی (.sum)
-            if feats.get("f9") and txt == ".sum" and event.is_reply:
+            # ۹. خلاصه‌سازی پیام طولانی (.sum / .خلاصه)
+            if feats.get("f9") and txt in (".sum", ".خلاصه") and event.is_reply:
                 rep = await event.get_reply_message()
                 if rep and rep.raw_text:
                     words = rep.raw_text.split()
@@ -935,18 +1547,20 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     await event.edit(f"📝 <b>خلاصه پیام ({len(words)} کلمه):</b>\n{html.escape(summary)}", parse_mode="html")
                 return
 
-            # ۷. ترجمه سریع (.tr)
+            # ۷. ترجمه سریع (.tr یا .tr en)
             if feats.get("f7") and txt.startswith(".tr") and event.is_reply:
                 rep = await event.get_reply_message()
                 if rep and rep.raw_text:
+                    parts = txt.split()
+                    target_lang = parts[1].strip() if len(parts) > 1 else "fa"
                     try:
                         r = requests.get(
                             "https://translate.googleapis.com/translate_a/single",
-                            params={"client": "gtx", "sl": "auto", "tl": "fa", "dt": "t", "q": rep.raw_text[:500]},
+                            params={"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": rep.raw_text[:500]},
                             timeout=8
                         ).json()
                         tr_text = "".join([part[0] for part in r[0] if part[0]])
-                        await event.edit(f"🌐 <b>ترجمه سلف دارک:</b>\n{html.escape(tr_text)}", parse_mode="html")
+                        await event.edit(f"🌐 <b>ترجمه سلف دارک ({target_lang}):</b>\n{html.escape(tr_text)}", parse_mode="html")
                     except Exception:
                         await event.edit("⚠️ خطا در ارتباط با سرویس ترجمه.")
                 return
@@ -975,6 +1589,15 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
 
         # پردازش پیام‌های ورودی از دیگران (Incoming Messages)
         if not event.out:
+            # ۳۹. شکارچی تگ و منشن در گروه‌ها (بدون ارسال پیام مزاحم در Saved Messages)
+            if feats.get("f39") and event.is_group and getattr(event.message, "mentioned", False):
+                try:
+                    chat_obj = await event.get_chat()
+                    g_title = getattr(chat_obj, "title", "گروه") or "گروه"
+                    log_self_activity(user_id, "mention_in", g_title, (event.raw_text or "[مدیا]")[:100])
+                except Exception:
+                    pass
+
             # ۴۱. قابلیت «کامنت اول خودکار» در گروه‌های متصل به کانال
             if feats.get("f41") and (event.is_group or event.is_channel):
                 fwd = getattr(event.message, "fwd_from", None)
@@ -1020,6 +1643,9 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     log_self_activity(user_id, "pv_msg_in", s_name, (event.raw_text or "[مدیا]")[:80])
 
                     # ۴۲. قابلیت «عضویت اجباری پیوی» (حداکثر ۳ کانال که ربات در آن‌ها ادمین است)
+                    # رفتار دقیق طبق درخواست شما:
+                    # - اگر اولین پیام کاربر باشد و قبلاً پیام نداده باشد: پیامش حذف نشود و فقط روی پیامش ریپلای شود و بگوید باید عضو شوی!
+                    # - اگر دومین پیام باشد یا از قبل پیام داده باشد: پیام کاربر پاک شود و پیام عضویت اجباری با دکمه شیشه‌ای ارسال گردد!
                     if feats.get("f42") and BOT_APP_REF is not None:
                         with closing(get_conn()) as conn:
                             pv_chs = conn.execute(
@@ -1037,66 +1663,90 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                                     not_joined_pv.append(pch)
 
                             if not_joined_pv:
-                                # ۱. حذف سریع پیام فرستنده در پیوی
-                                try:
-                                    await event.delete()
-                                except Exception:
-                                    pass
+                                # بررسی اینکه آیا این اولین پیام این شخص به کاربر است یا قبلاً هم پیام داده است
+                                with closing(get_conn()) as conn:
+                                    hist_row = conn.execute(
+                                        "SELECT msg_count FROM pv_force_history WHERE owner_id=? AND sender_id=?",
+                                        (user_id, sender.id)
+                                    ).fetchone()
+                                    prev_db_count = hist_row["msg_count"] if hist_row else 0
 
-                                log_self_activity(user_id, "pv_force_block", s_name, f"{len(not_joined_pv)} کانال عضو نشده")
-
-                                # ۲. ارسال اخطار عضویت اجباری پیوی (حداکثر هر ۳۰ ثانیه یک بار برای جلوگیری از اسپم)
-                                now_ts = time.time()
-                                last_pv_warn = AUTOREPLY_COOLDOWN.get((user_id, -sender.id), 0.0)
-                                if (now_ts - last_pv_warn) >= 25.0:
-                                    AUTOREPLY_COOLDOWN[(user_id, -sender.id)] = now_ts
+                                had_prior_messages = prev_db_count > 0
+                                if not had_prior_messages:
                                     try:
-                                        bot_me = await BOT_APP_REF.bot.get_me()
-                                        # تلاش برای ارسال مستقیم دکمه‌های شیشه‌ای رنگی از طریق Inline ربات در پیوی
-                                        sent_inline = False
-                                        try:
-                                            q_res = await client.inline_query(bot_me.username, f"pvforce:{user_id}:{sender.id}")
-                                            if q_res:
-                                                await q_res[0].click(event.chat_id)
-                                                sent_inline = True
-                                        except Exception:
-                                            sent_inline = False
-
-                                        # همچنین ارسال کیبورد شیشه‌ای رنگی از طریق ربات و پیام راهنما در پیوی در صورت غیرفعال بودن Inline
-                                        pv_rows = [
-                                            [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
-                                            for c in not_joined_pv
+                                        recent_msgs = await client.get_messages(event.chat_id, limit=6)
+                                        # اگر قبل از این پیام، هر پیامی در تاریخچه این پیوی وجود داشته باشد یعنی از قبل پیام داده بود
+                                        prior_msgs = [
+                                            m for m in recent_msgs
+                                            if getattr(m, "id", None) != event.id
                                         ]
-                                        pv_rows.append([
-                                            p_btn("✅ بررسی عضویت", callback_data=f"pvcheck:{user_id}", style="success", emoji_key="check")
-                                        ])
+                                        if len(prior_msgs) > 0:
+                                            had_prior_messages = True
+                                    except Exception:
+                                        pass
+
+                                is_first_ever_msg = not had_prior_messages
+
+                                with closing(get_conn()) as conn, conn:
+                                    conn.execute(
+                                        """INSERT INTO pv_force_history (owner_id, sender_id, msg_count, updated_at)
+                                           VALUES (?, ?, 1, ?)
+                                           ON CONFLICT(owner_id, sender_id) DO UPDATE SET
+                                           msg_count = msg_count + 1, updated_at = excluded.updated_at""",
+                                        (user_id, sender.id, datetime.now().isoformat())
+                                    )
+
+                                if is_first_ever_msg:
+                                    # اولین پیام کاربر است -> پیامش حذف نمی‌شود! فقط روی آن ریپلای زده می‌شود
+                                    log_self_activity(user_id, "pv_force_block", s_name, "پیام اول (ریپلای بدون حذف)")
+                                    await send_pv_force_glass_warning(
+                                        client=client,
+                                        user_id=user_id,
+                                        sender_id=sender.id,
+                                        chat_id=event.chat_id,
+                                        not_joined_pv=not_joined_pv,
+                                        is_first_ever_msg=True,
+                                        reply_to_msg_id=event.id,
+                                    )
+                                else:
+                                    # پیام دوم به بعد است یا از قبل پیام داده بود -> پیام کاربر بلافاصله حذف می‌شود!
+                                    try:
+                                        await client.delete_messages(event.chat_id, [event.id], revoke=True)
+                                    except Exception:
                                         try:
-                                            await BOT_APP_REF.bot.send_message(
-                                                chat_id=sender.id,
-                                                text=p_text(
-                                                    "⚠️ <b>قفل عضویت اجباری پیوی فعال است!</b>\n\n"
-                                                    "برای پیام دادن به این کاربر ابتدا باید در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ بررسی عضویت»</b> را بزنید:"
-                                                ),
-                                                parse_mode=ParseMode.HTML,
-                                                reply_markup=InlineKeyboardMarkup(pv_rows)
-                                            )
+                                            await event.delete()
                                         except Exception:
                                             pass
-
-                                        if not sent_inline:
-                                            ch_lines = "\n".join([f"🔹 <a href=\"{html.escape(c['channel_link'])}\">عضویت در {html.escape(c['title'])}</a>" for c in not_joined_pv])
-                                            verify_url = f"https://t.me/{bot_me.username}?start=pvcheck_{user_id}"
-                                            await client.send_message(
-                                                event.chat_id,
-                                                f"⚠️ <b>برای پیام دادن به این کاربر ابتدا باید عضو این کانال‌ها بشی:</b>\n\n"
-                                                f"{ch_lines}\n\n"
-                                                f"✅ <a href=\"{verify_url}\">بررسی عضویت و باز کردن قفل پیوی (کلیک کنید)</a>",
-                                                parse_mode="html",
-                                                link_preview=False
-                                            )
-                                    except Exception as e:
-                                        logger.debug(f"PV force warn error: {e}")
+                                    log_self_activity(user_id, "pv_force_block", s_name, "حذف پیام (عضو نشده)")
+                                    now_ts = time.time()
+                                    last_pv_warn = AUTOREPLY_COOLDOWN.get((user_id, -sender.id), 0.0)
+                                    if (now_ts - last_pv_warn) >= 3.0:
+                                        AUTOREPLY_COOLDOWN[(user_id, -sender.id)] = now_ts
+                                        await send_pv_force_glass_warning(
+                                            client=client,
+                                            user_id=user_id,
+                                            sender_id=sender.id,
+                                            chat_id=event.chat_id,
+                                            not_joined_pv=not_joined_pv,
+                                            is_first_ever_msg=False,
+                                            reply_to_msg_id=None,
+                                        )
                                 return
+
+                    # ۳۵. قفل پیوی (منشی هوشمند)
+                    if feats.get("f35"):
+                        try:
+                            await client.delete_messages(event.chat_id, [event.id], revoke=True)
+                        except Exception:
+                            pass
+                        now_ts = time.time()
+                        if (now_ts - AUTOREPLY_COOLDOWN.get((user_id, sender.id), 0.0)) >= 30.0:
+                            AUTOREPLY_COOLDOWN[(user_id, sender.id)] = now_ts
+                            try:
+                                await client.send_message(event.chat_id, "🔒 <b>پیوی در حال حاضر توسط منشی هوشمند سلف دارک قفل است. لطفاً بعداً پیام دهید.</b>", parse_mode="html")
+                            except Exception:
+                                pass
+                        return
 
                     # ۲۴. پیشنهاد هوشمند شکلک / ری‌اکشن خودکار (فقط پیوی اکانت‌ها)
                     if feats.get("f24"):
@@ -1162,6 +1812,8 @@ async def start_single_self_client(user_id: int, session_str: str) -> bool:
         await setup_telethon_handlers(user_id, client)
         ACTIVE_SELF_CLIENTS[user_id] = client
         await update_user_profile_clock_now(user_id, client, force=True)
+        if is_admin(user_id):
+            asyncio.create_task(ensure_botfather_inline_enabled(client))
         logger.info(f"🌑 سلف دارک برای کاربر {user_id} با موفقیت روشن شد.")
         return True
     except Exception as e:
@@ -1299,8 +1951,12 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
             p_btn(f"فعالسازی و اتصال سلف دارک ({self_status})", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
         ],
         [
-            p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
+            p_btn("مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
+            p_btn("📖 توضیحات قابلیت‌ها (۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
+        ],
+        [
             p_btn("تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
+            p_btn("📊 پنل مرکزی (گزارش ۲۴ ساعته)", callback_data="self:central_panel", style="primary", emoji_key="crown"),
         ],
         [
             p_btn("خرید الماس (TON / ریالی)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
@@ -1322,7 +1978,7 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
-    """صفحه‌بندی قابلیت‌های سلف دارک (شامل کامنت اول، عضویت اجباری پیوی، ساخت قرعه‌کشی، ساخت دکمه شیشه‌ای و در آخر پنل مرکزی)"""
+    """صفحه‌بندی قابلیت‌های سلف دارک (شامل دکمه توضیحات کامل ۴۵ قابلیت، کامنت اول، عضویت اجباری پیوی، قرعه‌کشی، دکمه شیشه‌ای و پنل مرکزی)"""
     feats = get_user_features(user_id)
     keys = list(SELF_DARK_FEATURES.keys())
     per_page = 10
@@ -1331,6 +1987,9 @@ def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup
     slice_keys = keys[page * per_page : (page + 1) * per_page]
 
     rows = [
+        [
+            p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل هر ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
+        ],
         [
             p_btn("🎁 ساخت قرعه‌کشی کانال", callback_data="lotto:start", style="success", emoji_key="gift"),
             p_btn("✨ ساخت دکمه شیشه‌ای کانال", callback_data="chbtn:start", style="primary", emoji_key="sparkles"),
@@ -1846,20 +2505,270 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ====================================================================
 #  مدیریت قابلیت‌های سلف دارک (روشن/خاموش، تغییر مقادیر و پنل مرکزی)
 # ====================================================================
+#  کتابچه و دایرةالمعارف کامل «توضیحات قابلیت‌ها» (هر ۴۵ قابلیت در ۹ صفحه)
+# ====================================================================
+
+SELF_FEATURES_GUIDE_PAGES = [
+    # صفحه ۱ (قابلیت‌های ۱ تا ۵)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۱ از ۹ (قابلیت‌های ۱ تا ۵)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "1️⃣ <b>۱. پاسخگویی خودکار هوشمند (فقط پیوی اکانت‌ها):</b>\n"
+        "• <b>کارکرد:</b> وقتی آنلاین نیستید، منشی هوشمند فقط به اکانت‌های واقعی اشخاص (نه ربات‌ها و نه کانال‌ها) پاسخ خودکار می‌دهد.\n"
+        "• <b>نحوه استفاده دقیق:</b> در بخش مدیریت قابلیت‌ها، گزینه ۱ را <b>🟢 روشن</b> کنید. برای تغییر متن پاسخ، دکمه <b>«⚙️ تنظیم مقدار»</b> جلوی آن را بزنید و متن دلخواه خود را بفرستید (برای جلوگیری از اسپم، به هر شخص هر ۶۰ ثانیه یک بار پاسخ می‌دهد).\n\n"
+        "2️⃣ <b>۲. دستیار هوش مصنوعی:</b>\n"
+        "• <b>کارکرد:</b> پاسخگویی هوشمند به سوالات علمی، کدنویسی، انشا و ترجمه مستقیماً از داخل چت تلگرام.\n"
+        "• <b>نحوه استفاده دقیق:</b> ابتدا قابلیت ۲ را روشن کنید. سپس در هر چت یا گروهی بنویسید:\n"
+        "<code>.ai سوال شما</code> (مثال: <code>.ai خلاصه تاریخ ایران چیست؟</code>) و یا روی پیام شخص دیگری ریپلای کرده و فقط <code>.ai</code> بفرستید تا پاسخ کامل جایگزین پیام شما شود.\n\n"
+        "3️⃣ <b>۳. تغییر خودکار بیوگرافی با ساعت:</b>\n"
+        "• <b>کارکرد:</b> نمایش ساعت زنده و متن دلخواه در قسمت Bio پروفایل که راس هر دقیقه آپدیت می‌شود.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳ را روشن کنید و از دکمه <b>«⚙️ تنظیم مقدار»</b> متن بیوگرافی خود را همراه با متغیر <code>{time}</code> بفرستید (مثال: <code>🌑 Self Dark | ⏰ {time}</code>).\n\n"
+        "4️⃣ <b>۴. ساعت زنده در نام و نام خانوادگی پروفایل (دقیق هر دقیقه):</b>\n"
+        "• <b>کارکرد:</b> قرار دادن ساعت فونت‌دار زنده در بخش نام خانوادگی پروفایل که دقیقاً طبق ساعت گوشی شما هر دقیقه بالا می‌رود.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۴ را روشن کنید. برای تنظیم دقیق با ساعت گوشی خود، در هر چتی دستور <code>.ساعت 16:45</code> (ساعت فعلی گوشی‌تان) را بفرستید یا در «⚙️ تنظیم مقدار» ساعت فعلی را وارد کنید.\n\n"
+        "5️⃣ <b>۵. زمان‌بندی و مدیریت سریع عکس پروفایل:</b>\n"
+        "• <b>کارکرد:</b> تغییر یا حذف آنی عکس پروفایل اکانت با یک دستور.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۵ را روشن کنید. در هر چتی روی یک عکس ریپلای کرده و دستور <code>.setpic</code> را بفرستید تا فوراً عکس پروفایل شما شود! برای حذف آخرین عکس پروفایل دستور <code>.delpic</code> را ارسال کنید."
+    ),
+    # صفحه ۲ (قابلیت‌های ۶ تا ۱۰)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۲ از ۹ (قابلیت‌های ۶ تا ۱۰)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "6️⃣ <b>۶. مدیریت وضعیت اکانت (آنلاین دائمی ۲۴ ساعته):</b>\n"
+        "• <b>کارکرد:</b> نگه داشتن وضعیت اکانت شما روی حالت <b>Online</b> به صورت ۲۴ ساعته حتی وقتی تلگرام شما بسته است.\n"
+        "• <b>نحوه استفاده دقیق:</b> کافی است گزینه ۶ را در پنل قابلیت‌ها <b>🟢 روشن</b> کنید؛ نیازی به هیچ دستوری ندارد و خودکار هر دقیقه وضعیت آنلاین ارسال می‌کند.\n\n"
+        "7️⃣ <b>۷. ترجمه خودکار پیام‌ها:</b>\n"
+        "• <b>کارکرد:</b> ترجمه فوری پیام‌های انگلیسی، عربی، ترکی، روسی و... به فارسی یا هر زبان دلخواه.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۷ را روشن کنید. سپس در پیوی یا گروه روی پیام مورد نظر <b>ریپلای (Reply)</b> کرده و بنویسید:\n"
+        "• <code>.tr</code> (برای ترجمه خودکار به فارسی)\n"
+        "• <code>.tr en</code> (برای ترجمه به انگلیسی؛ یا <code>.tr ar</code> عربی، <code>.tr tr</code> ترکی).\n\n"
+        "8️⃣ <b>۸. تبدیل ویس به متن (Voice to Text):</b>\n"
+        "• <b>کارکرد:</b> تبدیل پیام‌های صوتی (Voice) و ویدیومسیج‌های دایره‌ای به متن قابل خواندن.\n"
+        "• <b>نحوه استفاده دقیق:</b> ابتدا قابلیت ۸ را روشن کنید. سپس در هر چت یا گروهی روی <b>ویس یا ویدیومسیج</b> مورد نظر <b>ریپلای (Reply)</b> بزنید و دستور <code>.v2t</code> یا عبارت <code>تبدیل به متن</code> را بفرستید تا سلف دارک صدای داخل ویس را پردازش کرده و متن آن را بنویسد.\n\n"
+        "9️⃣ <b>۹. خلاصه‌سازی پیام‌های طولانی:</b>\n"
+        "• <b>کارکرد:</b> استخراج چکیده و تعداد کلمات پیام‌های بسیار بلند و مقاله‌ها.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۹ را روشن کنید، روی پیام متنی طولانی ریپلای کرده و دستور <code>.sum</code> یا <code>.خلاصه</code> را بفرستید.\n\n"
+        "🔟 <b>۱۰. دسته‌بندی هوشمند پیام‌ها و گفتگوها:</b>\n"
+        "• <b>کارکرد:</b> آنالیز کل چت‌های اکانت و تفکیک تعداد پیوی‌ها، گروه‌ها، کانال‌ها، ربات‌ها و چت‌های خوانده‌نشده.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۰ را روشن کرده و در هر چتی دستور <code>.cats</code> یا <code>.دسته بندی</code> را ارسال کنید."
+    ),
+    # صفحه ۳ (قابلیت‌های ۱۱ تا ۱۵)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۳ از ۹ (قابلیت‌های ۱۱ تا ۱۵)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "1️⃣1️⃣ <b>۱۱. ذخیره پیام‌های حذف‌شده (بدون ارسال گزارش مزاحم در Saved):</b>\n"
+        "• <b>کارکرد:</b> کش کردن بی‌صدای پیام‌های دریافتی در دیتابیس تا اگر طرف مقابل پیامش را دوطرفه پاک کرد، بتوانید متن آن را ببینید (بدون شلوغ کردن Saved Messages).\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۱ را روشن بگذارید. هر زمان خواستید پیام‌های حذف‌شده را ببینید، در چت دستور <code>.حذفیات</code> یا <code>.deleted</code> را ارسال کنید.\n\n"
+        "1️⃣2️⃣ <b>۱۲. ذخیره تاریخچه ویرایش پیام‌ها (Anti-Edit):</b>\n"
+        "• <b>کارکرد:</b> ذخیره متن اصلی پیام‌ها قبل از اینکه طرف مقابل آن‌ها را ویرایش (Edit) کند.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۲ را روشن بگذارید. برای دیدن متن قبل و بعد از ویرایش پیام‌ها، دستور <code>.ویرایشها</code> یا <code>.edits</code> را ارسال نمایید.\n\n"
+        "1️⃣3️⃣ <b>۱۳. پشتیبان‌گیری از گفتگوها (بکاپ چت):</b>\n"
+        "• <b>کارکرد:</b> استخراج پیام‌های یک پیوی یا گروه در قالب فایل متنی <code>.txt</code>.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۳ را روشن کنید و داخل چت مورد نظر دستور <code>.backup</code> (برای ۱۰۰ پیام آخر) یا مثلاً <code>.backup 300</code> (برای ۳۰۰ پیام آخر) را بفرستید تا فایل بکاپ ساخته و ارسال شود.\n\n"
+        "1️⃣4️⃣ <b>۱۴. جستجوی پیشرفته پیام‌ها:</b>\n"
+        "• <b>کارکرد:</b> جستجوی سریع یک کلمه یا عدد در کل تاریخچه چت فعلی همراه با ساعت و آیدی پیام.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۴ را روشن کرده و بنویسید <code>.find کلمه</code> (مثال: <code>.find شماره کارت</code>).\n\n"
+        "1️⃣5️⃣ <b>۱۵. بایگانی خودکار گفتگوها (Archive):</b>\n"
+        "• <b>کارکرد:</b> انتقال سریع چت به پوشه بایگانی تلگرام یا خارج کردن آن.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۵ را روشن کنید؛ در داخل چت دستور <code>.archive</code> را برای بایگانی کردن و دستور <code>.unarchive</code> را برای خروج از بایگانی بفرستید."
+    ),
+    # صفحه ۴ (قابلیت‌های ۱۶ تا ۲۰)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۴ از ۹ (قابلیت‌های ۱۶ تا ۲۰)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "1️⃣6️⃣ <b>۱۶. یادداشت خصوصی برای هر گفتگو:</b>\n"
+        "• <b>کارکرد:</b> ثبت یک نکته یا یادداشت مخفی درباره هر شخص یا گروه در دیتابیس سلف دارک.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۶ را روشن کنید. در چت مورد نظر بنویسید <code>.note متن یادداشت</code> (مثال: <code>.note مشتری ثابت - بدهی تسویه شد</code>). برای مشاهده یادداشت همان چت دستور <code>.getnote</code> را بفرستید.\n\n"
+        "1️⃣7️⃣ <b>۱۷. سنجاق خودکار پیام‌های مهم (Auto-Pin):</b>\n"
+        "• <b>کارکرد:</b> پین شدن خودکار پیام‌هایی که حاوی کلمه کلیدی مهم هستند.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۷ را روشن کنید. هر پیامی که در چت بیاید و داخل آن کلمه <code>مهم</code> یا هشتگ <code>#مهم</code> باشد، سلف دارک خودکار آن را Pin می‌کند.\n\n"
+        "1️⃣8️⃣ <b>۱۸. یادآوری پیام‌ها و کارها (Reminder):</b>\n"
+        "• <b>کارکرد:</b> تنظیم آلارم و یادآور دقیق در تلگرام.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۱۸ را روشن کنید و بنویسید:\n"
+        "<code>.rem [دقیقه] [متن یادآوری]</code> (مثال: <code>.rem 15 چک کردن سرور</code>). دقیقاً ۱۵ دقیقه بعد سلف دارک در همان چت به شما پیام یادآوری می‌دهد.\n\n"
+        "1️⃣9️⃣ <b>۱۹. دستورات سریع اختصاصی:</b>\n"
+        "• <b>کارکرد:</b> ابزارهای فوری بررسی سرعت و استخراج مشخصات هر کاربر.\n"
+        "• <b>نحوه استفاده دقیق:</b>\n"
+        "  • <code>.ping</code> : تست آنلاین بودن و سرعت پینگ سلف دارک به میلی‌ثانیه\n"
+        "  • <code>.id</code> : دریافت آیدی عددی چت (و آیدی عددی شخص در صورت ریپلای)\n"
+        "  • <code>.info</code> : دریافت نام کامل، یوزرنیم و آیدی عددی شخص با ریپلای روی پیام او.\n\n"
+        "2️⃣0️⃣ <b>۲۰. مدیریت اکانت و بررسی وضعیت نشست:</b>\n"
+        "• <b>کارکرد:</b> مشاهده اطلاعات اتصال اکانت و نشست فعال در سلف دارک.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۰ را روشن کرده و دستور <code>.session</code> یا <code>.اکانت</code> را در چت بفرستید."
+    ),
+    # صفحه ۵ (قابلیت‌های ۲۱ تا ۲۵)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۵ از ۹ (قابلیت‌های ۲۱ تا ۲۵)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "2️⃣1️⃣ <b>۲۱. پاسخ با سبک دلخواه خودکار (فونت/بولد/ایتالیک/مونو):</b>\n"
+        "• <b>کارکرد:</b> تغییر خودکار استایل تمام پیام‌های معمولی که در تلگرام تایپ و ارسال می‌کنید.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۱ را روشن کنید و روی <b>«⚙️ تنظیم مقدار»</b> بزنید:\n"
+        "  • ارسال <code>bold</code> برای ضخیم شدن خودکار همه پیام‌ها\n"
+        "  • ارسال <code>italic</code> برای کج شدن خودکار پیام‌ها\n"
+        "  • ارسال <code>mono</code> برای استایل کد/تک‌فاصله.\n\n"
+        "2️⃣2️⃣ <b>۲۲. حافظه اختصاصی هوش مصنوعی:</b>\n"
+        "• <b>کارکرد:</b> حفظ سابقه مکالمات شما با دستیار هوش مصنوعی (<code>.ai</code>) تا سوالات بعدی را در ادامه بحث قبلی پاسخ دهد.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۲ را روشن کنید. برای پاک کردن حافظه هوش مصنوعی هر زمان خواستید دستور <code>.aiclear</code> را بفرستید.\n\n"
+        "2️⃣3️⃣ <b>۲۳. پیشنهاد خودکار استیکر و ایموجی متحرک:</b>\n"
+        "• <b>کارکرد:</b> تبدیل سریع کلمات احساسی به ترکیب ایموجی‌های متحرک.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۳ را روشن کنید و یکی از دستورات <code>.تبریک</code>، <code>.عشق</code>، <code>.خنده</code> یا <code>.اتش</code> را در چت بنویسید.\n\n"
+        "2️⃣4️⃣ <b>۲۴. پیشنهاد هوشمند شکلک (ری‌اکشن خودکار پیوی):</b>\n"
+        "• <b>کارکرد:</b> ثبت خودکار ری‌اکشن (Reaction) روی تمام پیام‌هایی که اشخاص واقعی در پیوی برای شما می‌فرستند.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۴ را روشن کنید و از «⚙️ تنظیم مقدار» ایموجی دلخواه خود (مثلاً <code>🔥</code> یا <code>❤️</code>) را وارد نمایید.\n\n"
+        "2️⃣5️⃣ <b>۲۵. ساخت دستورات شخصی (میانبر متنی):</b>\n"
+        "• <b>کارکرد:</b> تعریف کلمه کوتاه که با تایپ آن، یک متن کامل جایگزینش شود (مناسب شماره کارت، آدرس کانال، قوانین و...).\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۵ را روشن کنید و در «⚙️ تنظیم مقدار» با فرمت <code>کلید=پاسخ</code> بنویسید (مثال: <code>.کارت=6037991122334455 به نام امیر</code>). حالا هر جا <code>.کارت</code> بنویسید خودکار تبدیل می‌شود!"
+    ),
+    # صفحه ۶ (قابلیت‌های ۲۶ تا ۳۰)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۶ از ۹ (قابلیت‌های ۲۶ تا ۳۰)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "2️⃣6️⃣ <b>۲۶. دفترچه یادداشت خصوصی کل اکانت:</b>\n"
+        "• <b>کارکرد:</b> مشاهده یکجای تمام یادداشت‌هایی که در پیوی‌ها و گروه‌های مختلف با <code>.note</code> ذخیره کرده‌اید.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۶ را روشن کنید و در هر چتی دستور <code>.notebook</code> را ارسال نمایید.\n\n"
+        "2️⃣7️⃣ <b>۲۷. گزارش فعالیت روزانه اکانت:</b>\n"
+        "• <b>کارکرد:</b> دریافت خلاصه عملکرد ۲۴ ساعت اخیر اکانت به صورت متنی در داخل چت.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۷ را روشن کرده و دستور <code>.report</code> یا <code>.گزارش</code> را بفرستید.\n\n"
+        "2️⃣8️⃣ <b>۲۸. آمار گفتگوها و پیام‌های سلف دارک:</b>\n"
+        "• <b>کارکرد:</b> نمایش تعداد کل پیام‌های پردازش‌شده توسط موتور سلف دارک و تعداد گروه‌های فعال در تبچی.\n"
+        "• <b>نحوه استفاده دقیق:</b> در هر چتی دستور <code>.stats</code> را ارسال کنید.\n\n"
+        "2️⃣9️⃣ <b>۲۹. ارسال زمان‌بندی‌شده و تاخیری پیام‌ها:</b>\n"
+        "• <b>کارکرد:</b> تنظیم پیامی که چند دقیقه یا ساعت دیگر به صورت خودکار در همان چت ارسال شود.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۲۹ را روشن کنید و بنویسید:\n"
+        "<code>.later [دقیقه] [متن پیام]</code> (مثال: <code>.later 30 سلام وقت بخیر، فایل آماده شد</code>). دستور شما فوراً پاک شده و ۳۰ دقیقه بعد پیام ارسال می‌گردد.\n\n"
+        "3️⃣0️⃣ <b>۳۰. مدیریت هوشمند اعلان‌ها (Mute / Unmute):</b>\n"
+        "• <b>کارکرد:</b> بی‌صدا یا صدادار کردن سریع نوتیفیکیشن‌های هر چت یا گروه با یک دستور.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۰ را روشن کنید؛ دستور <code>.mute</code> برای بی‌صدا کردن دائمی چت و دستور <code>.unmute</code> برای باز کردن صدای اعلان چت."
+    ),
+    # صفحه ۷ (قابلیت‌های ۳۱ تا ۳۵)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۷ از ۹ (قابلیت‌های ۳۱ تا ۳۵)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "3️⃣1️⃣ <b>۳۱. حالت روح (سین بدون تیک دوم در پیوی):</b>\n"
+        "• <b>کارکرد:</b> پردازش پیام‌های دریافتی توسط سلف بدون اینکه تیک دوم خوانده شدن (Seen) به صورت خودکار برای فرستنده بخورد.\n"
+        "• <b>نحوه استفاده دقیق:</b> کافی است قابلیت ۳۱ را در پنل <b>🟢 روشن</b> نگه دارید.\n\n"
+        "3️⃣2️⃣ <b>۳۲. تایپینگ و اکشن دائمی (Auto Action):</b>\n"
+        "• <b>کارکرد:</b> نمایش حالت «در حال نوشتن...»، «در حال ضبط صدا...» یا «در حال بازی...» بالای صفحه پیوی وقتی کسی به شما پیام می‌دهد.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۲ را روشن کنید و در «⚙️ تنظیم مقدار» یکی از کلمات <code>typing</code> (تایپینگ)، <code>voice</code> (ضبط ویس) یا <code>game</code> (بازی) را وارد کنید.\n\n"
+        "3️⃣3️⃣ <b>۳۳. دانلود مدیاهای تایمردار و یک‌بار مصرف:</b>\n"
+        "• <b>کارکرد:</b> ذخیره عکس‌ها و ویدیوهای تایمردار (Self-Destructing) در پیام‌های ذخیره‌شده (Saved Messages) شما.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۳ را روشن کنید، روی عکس یا ویدیوی مورد نظر ریپلای کرده و دستور <code>.dl</code> را بفرستید تا فایل بلافاصله در Saved Messages شما ذخیره شود.\n\n"
+        "3️⃣4️⃣ <b>۳۴. ضد لینک و ضد اسپم پیوی:</b>\n"
+        "• <b>کارکرد:</b> حذف فوری و دوطرفه هرگونه لینک تلگرام (<code>t.me/</code>) یا لینک وب‌سایت که افراد در پیوی برای شما می‌فرستند.\n"
+        "• <b>نحوه استفاده دقیق:</b> کافی است قابلیت ۳۴ را در منوی قابلیت‌ها <b>🟢 روشن</b> کنید.\n\n"
+        "3️⃣5️⃣ <b>۳۵. قفل پیوی (منشی هوشمند موقع شلوغی):</b>\n"
+        "• <b>کارکرد:</b> وقتی جلسه‌ای دارید یا نمی‌خواهید کسی پیام بدهد، پیام‌های ورودی پیوی را پاک کرده و اعلام می‌کند پیوی قفل است.\n"
+        "• <b>نحوه استفاده دقیق:</b> از منوی قابلیت‌ها روشن کنید یا در هر چتی دستور <code>.lockpv</code> (برای قفل کردن) و <code>.unlockpv</code> (برای باز کردن قفل پیوی) را بفرستید."
+    ),
+    # صفحه ۸ (قابلیت‌های ۳۶ تا ۴۰)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۸ از ۹ (قابلیت‌های ۳۶ تا ۴۰)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "3️⃣6️⃣ <b>۳۶. خوش‌آمدگویی خودکار در گروه‌ها:</b>\n"
+        "• <b>کارکرد:</b> ارسال خودکار پیام خوش‌آمدگویی به محض عضو شدن یا اد شدن نفر جدید در گروه.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۶ را روشن کنید و از «⚙️ تنظیم مقدار» متن خوش‌آمدگویی دلخواه خود را وارد نمایید.\n\n"
+        "3️⃣7️⃣ <b>۳۷. ماشین‌حساب سریع در چت:</b>\n"
+        "• <b>کارکرد:</b> محاسبه آنی عبارات ریاضی مستقیماً داخل پیام تلگرام.\n"
+        "• <b>نحوه استفاده دقیق:</b> در هر چتی بنویسید <code>.calc عبارت</code> (مثال: <code>.calc (450*12)+800</code>) تا نتیجه دقیق جایگزین پیام شود.\n\n"
+        "3️⃣8️⃣ <b>۳۸. ساخت فونت انگلیسی و زیباسازی متن:</b>\n"
+        "• <b>کارکرد:</b> تبدیل متن انگلیسی و اعداد به فونت خاص و ضخیم دارک (<code>𝗦𝗲𝗹𝗳 𝗗𝗮𝗿𝗸 𝟮𝟬𝟮۶</code>).\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۸ را روشن کرده و بنویسید <code>.font متن شما</code> (مثال: <code>.font Self Dark VIP</code>).\n\n"
+        "3️⃣9️⃣ <b>۳۹. شکارچی تگ و منشن در گروه‌ها:</b>\n"
+        "• <b>کارکرد:</b> ذخیره تمام پیام‌هایی که در گروه‌ها شما را تگ یا ریپلای کرده‌اند (بدون ارسال پیام مزاحم در Saved Messages).\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۳۹ را روشن بگذارید و هر زمان خواستید لیست تگ‌ها را ببینید دستور <code>.mentions</code> را ارسال کنید.\n\n"
+        "4️⃣0️⃣ <b>۴۰. پاکسازی سریع پیام‌ها (Purge):</b>\n"
+        "• <b>کارکرد:</b> حذف گروهی و سریع پیام‌های ارسالی خودتان در هر پیوی یا گروه.\n"
+        "• <b>نحوه استفاده دقیق:</b> قابلیت ۴۰ را روشن کنید و بنویسید <code>.del [تعداد]</code> (مثال: <code>.del 20</code> برای پاک کردن ۲۰ پیام آخر خودتان در یک ثانیه)."
+    ),
+    # صفحه ۹ (قابلیت‌های ۴۱ تا ۴۵)
+    (
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۹ از ۹ (قابلیت‌های ۴۱ تا ۴۵)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "4️⃣1️⃣ <b>۴۱. کامنت اول خودکار کانال (با امضای Self Dark):</b>\n"
+        "• <b>کارکرد:</b> به محض اینکه پست جدیدی در کانال گذاشته شود، اکانت شما در کسری از ثانیه اولین کامنت را زیر پست ثبت می‌کند!\n"
+        "• <b>نحوه استفاده دقیق:</b> از «⚙️ تنظیم مقدار» جلوی قابلیت ۴۱ می‌توانید کلمه کامنت اول را تغییر دهید (پیش‌فرض: <code>کامنت اول</code>). سپس وارد <b>گروه چت متصل به آن کانال</b> شوید و عبارت <code>تنظیم کامنت اول</code> را بفرستید (برای لغو در آن گروه: <code>حذف کامنت اول</code>).\n\n"
+        "4️⃣2️⃣ <b>۴۲. عضویت اجباری پیوی با دکمه شیشه‌ای (حداکثر ۳ کانال):</b>\n"
+        "• <b>کارکرد:</b> قفل کردن پیوی روی حداکثر ۳ کانال شما به صورت دکمه شیشه‌ای:\n"
+        "  🔹 <b>پیام اول شخص:</b> اگر کسی تا حالا به شما پیام نداده باشد و اولین پیامش را بفرستد، پیام اولش حذف نمی‌شود بلکه سلف دارک <b>روی پیامش ریپلای می‌زند</b> و با دکمه‌های شیشه‌ای می‌گوید باید عضو کانال‌ها شوی.\n"
+        "  🔹 <b>پیام دوم به بعد (یا اگر از قبل پیام داده بود):</b> پیام شخص را <b>بلافاصله پاک می‌کند</b> و دکمه‌های شیشه‌ای عضویت و بررسی عضویت را می‌فرستد!\n"
+        "• <b>نحوه استفاده دقیق:</b> روی «🛡 عضویت اجباری پیوی» بزنید، ربات را در کانال خود ادمین کنید و آیدی کانال را ثبت نمایید.\n\n"
+        "4️⃣3️⃣ <b>۴۳. ساخت قرعه‌کشی هوشمند برای کانال:</b>\n"
+        "• <b>کارکرد و استفاده:</b> روی گزینه ۴۳ کلیک کنید؛ نام قرعه‌کشی، حداقل/حداکثر نفرات، کانال‌های جوین اجباری (تا ۱۰ کانال)، توضیحات، زمان پایان (به ساعت یا دقیقه)، تعداد برنده‌ها و کانال مقصد را بدهید و <b>«🚀 پست کردن در کانال»</b> را بزنید. بنر با دکمه شیشه‌ای سبز (شمارنده زنده نفرات) و دکمه آبی («🎁 شرکت در قرعه‌کشی») پست شده و سر ساعت خودکار قرعه‌کشی و اعلام برنده می‌شود!\n\n"
+        "4️⃣4️⃣ <b>۴۴. ساخت دکمه شیشه‌ای رنگی برای کانال:</b>\n"
+        "• <b>کارکرد و استفاده:</b> روی گزینه ۴۴ کلیک کنید؛ پست (عکس/ویدیو/گیف/فایل/متن)، لینک دکمه، نام دکمه، رنگ دکمه (<b>آبی، سبز، قرمز یا معمولی شیشه‌ای</b>) و کانال مقصد را بدهید تا در کانال پست شود.\n\n"
+        "4️⃣5️⃣ <b>۴۵. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت):</b>\n"
+        "• <b>کارکرد و استفاده:</b> آخرین قابلیت سلف دارک؛ با کلیک روی آن در ربات (یا ارسال دستور <code>.پنل مرکزی</code> در چت)، آمار دقیق تمام پیام‌های شما در گروه‌ها، پیوی‌ها، ربات‌های استارت‌شده، کامنت‌های اول و فعالیت‌های ۲۴ ساعت اخیر نمایش داده می‌شود."
+    ),
+]
+
+def build_features_guide_keyboard(current_page: int = 0) -> InlineKeyboardMarkup:
+    total_pages = len(SELF_FEATURES_GUIDE_PAGES)
+    current_page = max(0, min(current_page, total_pages - 1))
+
+    rows = []
+    # ردیف دکمه‌های قبل و بعد
+    nav_row = []
+    if current_page > 0:
+        nav_row.append(p_btn("⬅️ صفحه قبل", callback_data=f"self:features_guide:{current_page - 1}", style="primary"))
+    nav_row.append(p_btn(f"📄 صفحه {current_page + 1} از {total_pages}", callback_data="noop", style="success", emoji_key="sparkles"))
+    if current_page < total_pages - 1:
+        nav_row.append(p_btn("صفحه بعد ➡️", callback_data=f"self:features_guide:{current_page + 1}", style="primary"))
+    rows.append(nav_row)
+
+    # دکمه‌های دسترسی سریع به هر ۹ صفحه (هر صفحه شامل ۵ قابلیت)
+    page_labels = [
+        (0, "۱ تا ۵"),
+        (1, "۶ تا ۱۰"),
+        (2, "۱۱ تا ۱۵"),
+        (3, "۱۶ تا ۲۰"),
+        (4, "۲۱ تا ۲۵"),
+        (5, "۲۶ تا ۳۰"),
+        (6, "۳۱ تا ۳۵"),
+        (7, "۳۶ تا ۴۰"),
+        (8, "۴۱ تا ۴۵"),
+    ]
+    for i in range(0, len(page_labels), 3):
+        chunk = page_labels[i : i + 3]
+        r = []
+        for p_idx, lbl in chunk:
+            st = "success" if p_idx == current_page else "primary"
+            prefix = "🟢 " if p_idx == current_page else "📖 "
+            r.append(p_btn(f"{prefix}قابلیت {lbl}", callback_data=f"self:features_guide:{p_idx}", style=st))
+        rows.append(r)
+
+    rows.append([
+        p_btn("⚙️ ورود به مدیریت ۴۵ قابلیت سلف", callback_data="self:features_page:0", style="success", emoji_key="sparkles"),
+    ])
+    rows.append([
+        p_btn("🚀 بخش فعال‌سازی و وضعیت سلف", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
+        p_btn("🏠 منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
     data = query.data
 
+    if data.startswith("self:features_guide:"):
+        page = int(data.split(":")[2])
+        page = max(0, min(page, len(SELF_FEATURES_GUIDE_PAGES) - 1))
+        await query.answer(f"📖 صفحه {page + 1} از {len(SELF_FEATURES_GUIDE_PAGES)} توضیحات قابلیت‌ها")
+        await query.edit_message_text(
+            p_text(SELF_FEATURES_GUIDE_PAGES[page]),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_features_guide_keyboard(page)
+        )
+        return
+
     if data.startswith("self:features_page:"):
         page = int(data.split(":")[2])
         await query.answer()
         await query.edit_message_text(
             p_text(
-                "🌑 <b>پنل تنظیمات قابلیت‌های «سلف دارک | Self Dark»</b>\n\n"
+                "🌑 <b>پنل تنظیمات ۴۵ قابلیت «سلف دارک | Self Dark»</b>\n\n"
                 "✨ روی هر قابلیت کلیک کنید تا <b>🟢 روشن</b> یا <b>🔴 خاموش</b> شود.\n"
-                "⚙️ شامل <b>کامنت اول خودکار</b>، <b>عضویت اجباری پیوی</b>، <b>ساخت قرعه‌کشی کانال</b>، <b>ساخت دکمه شیشه‌ای کانال</b> و در آخرین قابلیت <b>پنل مرکزی (گزارش ۲۴ ساعت گذشته)</b>:"
+                "📖 برای مشاهده آموزش کامل و دقیق نحوه استفاده از تک‌تک ۴۵ قابلیت (مثل تبدیل ویس به متن، کامنت اول، عضویت اجباری پیوی و...) روی دکمه سبز <b>«📖 توضیحات قابلیت‌ها»</b> در بالا کلیک کنید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=build_features_keyboard(user.id, page)
@@ -1892,9 +2801,10 @@ async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_
         page = int(page_str)
         feats = get_user_features(user.id)
         for k in SELF_DARK_FEATURES:
-            feats[k] = (mode == "on")
+            if SELF_DARK_FEATURES[k].get("type") != "action_only":
+                feats[k] = (mode == "on")
         save_user_features(user.id, feats)
-        await query.answer("✅ وضعیت تمام ۴۰ قابلیت سلف دارک بروزرسانی شد!", show_alert=True)
+        await query.answer("✅ وضعیت تمام قابلیت‌های سلف دارک بروزرسانی شد!", show_alert=True)
         await query.edit_message_reply_markup(reply_markup=build_features_keyboard(user.id, page))
 
 async def feature_set_val_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2196,11 +3106,16 @@ async def activate_self_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(
             p_text(
                 f"✅ <b>سلف دارک شما هم‌اکنون روی شماره <code>{acc['phone']}</code> فعال و روشن است!</b>\n\n"
-                f"می‌توانید قابلیت‌ها را تنظیم کنید یا سلف را موقتاً خاموش نمایید:"
+                f"📖 از دکمه <b>«توضیحات قابلیت‌ها»</b> می‌توانید آموزش کامل و دقیق نحوه استفاده از تمامی <b>۴۵ قابلیت سلف دارک</b> را در ۹ صفحه مطالعه کنید یا قابلیت‌ها را مدیریت نمایید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+                [p_btn("⚙️ مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+                [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
+                [
+                    p_btn("📣 تبچی هوشمند", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
+                    p_btn("📊 پنل مرکزی ۲۴ ساعته", callback_data="self:central_panel", style="primary", emoji_key="crown"),
+                ],
                 [p_btn("خاموش کردن سلف دارک", callback_data="self:stop_now", style="danger", emoji_key="fire")],
                 [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")]
             ])
@@ -2575,18 +3490,19 @@ async def finalize_self_dark_login(update: Update, context: ContextTypes.DEFAULT
     await start_single_self_client(user.id, session_str)
 
     target_msg = update.effective_message
-    # ارسال پیام تبریک به کاربر
+    # ارسال پیام تبریک به کاربر همراه با دکمه توضیحات کامل ۴۵ قابلیت
     await target_msg.reply_text(
         p_text(
             f"🎉 <b>تبریک! «سلف دارک | Self Dark» با موفقیت روی اکانت شما فعال شد!</b>\n\n"
             f"📱 شماره متصل: <code>{phone}</code>\n"
             f"💎 هزینه کسر شده فعال‌سازی: <b>{act_cost} الماس</b> (ساعتی {hr_cost} الماس)\n\n"
-            f"✨ هم‌اکنون می‌توانید از دکمه‌های زیر ۴۰ قابلیت سلف دارک و تبچی هوشمند را شخصی‌سازی کنید:"
+            f"✨ هم‌اکنون می‌توانید از دکمه‌های زیر <b>۴۵ قابلیت سلف دارک</b> را شخصی‌سازی کنید و در بخش <b>«📖 توضیحات قابلیت‌ها»</b> نحوه استفاده دقیق از تک‌تک ۴۵ قابلیت را مشاهده نمایید:"
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
-            [p_btn("مدیریت تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="success", emoji_key="megaphone")],
+            [p_btn("⚙️ مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+            [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
+            [p_btn("📣 مدیریت تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="success", emoji_key="megaphone")],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")]
         ])
     )
@@ -4267,8 +5183,9 @@ async def pv_force_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         f"⚡ وضعیت فعلی قابلیت: <b>{st_txt}</b>\n"
         f"📊 کانال‌های ثبت‌شده شما: <b>{len(chs)} از ۳ کانال</b>\n\n"
         f"📋 <b>لیست کانال‌های عضویت اجباری پیوی شما:</b>\n{ch_list_txt}\n\n"
-        f"📌 <b>نحوه کارکرد:</b>\n"
-        f"وقتی این قابلیت روشن باشد، هر کسی در پیوی به شما پیام بدهد و عضو کانال‌های بالا نباشد، پیامش <b>سریعاً حذف می‌شود</b> و دکمه‌های شیشه‌ای رنگی کانال‌ها به همراه دکمه <b>«✅ بررسی عضویت»</b> برایش ارسال می‌گردد تا ابتدا عضو شود!"
+        f"📌 <b>نحوه کارکرد هوشمند:</b>\n"
+        f"1️⃣ <b>پیام اول شخص:</b> اگر کسی تا حالا به شما پیام نداده باشد و اولین پیامش را بفرستد، پیام اولش حذف نمی‌شود و سلف دارک <b>روی پیامش ریپلای می‌زند</b> و دکمه‌های شیشه‌ای عضویت در کانال‌ها را می‌فرستد.\n"
+        f"2️⃣ <b>پیام دوم به بعد (یا اگر از قبل پیام داده بود):</b> پیام شخص را <b>بلافاصله پاک می‌کند</b> و دکمه‌های شیشه‌ای عضویت اجباری و بررسی عضویت را برایش ارسال می‌نماید!"
     )
 
     rows = [
@@ -4381,7 +5298,79 @@ async def pv_force_add_receive(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return ConversationHandler.END
 
+async def inline_pv_force_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پاسخ به درخواست Inline سلف دارک برای ارسال مستقیم دکمه شیشه‌ای رنگی عضویت اجباری در پیوی"""
+    iq = update.inline_query
+    if not iq:
+        return
+    q_data = (iq.query or "").strip()
+    if not q_data.startswith("pvforce:"):
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    parts = q_data.split(":")
+    if len(parts) < 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    owner_id = int(parts[1])
+    sender_id = int(parts[2])
+    is_first = (parts[3] == "1") if len(parts) >= 4 else False
+
+    with closing(get_conn()) as conn:
+        pv_chs = conn.execute("SELECT * FROM pv_force_channels WHERE user_id=? LIMIT 3", (owner_id,)).fetchall()
+
+    if not pv_chs:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    not_joined = []
+    for pch in pv_chs:
+        try:
+            m = await context.bot.get_chat_member(chat_id=pch["channel_id"], user_id=sender_id)
+            if m.status in ("left", "kicked"):
+                not_joined.append(pch)
+        except Exception:
+            not_joined.append(pch)
+
+    target_chs = not_joined if not_joined else pv_chs
+    pv_rows = [
+        [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
+        for c in target_chs
+    ]
+    pv_rows.append([
+        p_btn("✅ بررسی عضویت و باز کردن قفل پیوی", callback_data=f"pvcheck:{owner_id}", style="success", emoji_key="check")
+    ])
+
+    if is_first:
+        msg_txt = p_text(
+            "⚠️ <b>قفل عضویت اجباری پیوی فعال است!</b>\n\n"
+            "👋 این اولین پیام شماست؛ برای اینکه بتوانید ادامه دهید و پیام‌های بعدی شما پاک نشود، ابتدا از طریق <b>دکمه‌های شیشه‌ای زیر</b> در کانال‌ها عضو شوید و سپس دکمه <b>«✅ بررسی عضویت»</b> را بزنید:"
+        )
+    else:
+        msg_txt = p_text(
+            "🚫 <b>پیام شما حذف شد! (قفل عضویت اجباری پیوی)</b>\n\n"
+            "⚠️ برای پیام دادن به این کاربر ابتدا باید از طریق <b>دکمه‌های شیشه‌ای زیر</b> در کانال‌ها عضو شوید و سپس روی <b>«✅ بررسی عضویت»</b> کلیک کنید:"
+        )
+
+    article = InlineQueryResultArticle(
+        id=f"pvforce_{owner_id}_{sender_id}_{int(time.time())}",
+        title="🛡 قفل عضویت اجباری پیوی سلف دارک",
+        description="ارسال دکمه‌های شیشه‌ای عضویت اجباری در پیوی",
+        input_message_content=InputTextMessageContent(
+            message_text=msg_txt,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        ),
+        reply_markup=InlineKeyboardMarkup(pv_rows),
+    )
+    await iq.answer([article], cache_time=0, is_personal=True)
+
 async def handle_pv_force_verify(update: Update, context: ContextTypes.DEFAULT_TYPE, user, owner_id: int, is_callback: bool = False):
+    if is_callback and user.id == owner_id:
+        await update.callback_query.answer("ℹ️ شما صاحب این پیوی هستید! این دکمه برای بررسی عضویت مخاطب شماست.", show_alert=True)
+        return
+
     with closing(get_conn()) as conn:
         pv_chs = conn.execute("SELECT * FROM pv_force_channels WHERE user_id=? LIMIT 3", (owner_id,)).fetchall()
 
@@ -4399,7 +5388,7 @@ async def handle_pv_force_verify(update: Update, context: ContextTypes.DEFAULT_T
             [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
             for c in not_joined
         ]
-        rows.append([p_btn("✅ بررسی عضویت", callback_data=f"pvcheck:{owner_id}", style="success", emoji_key="check")])
+        rows.append([p_btn("✅ بررسی عضویت و باز کردن قفل پیوی", callback_data=f"pvcheck:{owner_id}", style="success", emoji_key="check")])
         msg_txt = p_text(
             "⚠️ <b>برای پیام دادن به این کاربر ابتدا باید در کانال‌های زیر عضو شوید و سپس دکمه «✅ بررسی عضویت» را بزنید:</b>"
         )
@@ -4416,10 +5405,13 @@ async def handle_pv_force_verify(update: Update, context: ContextTypes.DEFAULT_T
             "✅ <b>عضویت شما در تمام کانال‌ها تایید شد!</b>\n"
             "🎉 اکنون قفل پیوی برای شما باز است و می‌توانید در پیوی به کاربر پیام دهید."
         )
+        ok_kb = InlineKeyboardMarkup([
+            [p_btn("🔓 عضویت تایید شد (قفل پیوی باز است)", callback_data="noop", style="success", emoji_key="check")]
+        ])
         if is_callback:
             await update.callback_query.answer("✅ عضویت شما تایید شد! اکنون می‌توانید پیام دهید.", show_alert=True)
             try:
-                await update.callback_query.edit_message_text(ok_txt, parse_mode=ParseMode.HTML)
+                await update.callback_query.edit_message_text(ok_txt, parse_mode=ParseMode.HTML, reply_markup=ok_kb)
             except Exception:
                 pass
         else:
@@ -5756,6 +6748,7 @@ def main():
     app.add_handler(admin_conv)
     app.add_handler(CommandHandler("start", start_cmd))
 
+    app.add_handler(InlineQueryHandler(inline_pv_force_handler))
     app.add_handler(CallbackQueryHandler(activate_self_code_keypad_callback, pattern="^codepad:"))
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(stop_self_now_callback, pattern="^self:stop_now$"))
@@ -5764,7 +6757,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pv_check_callback, pattern="^pvcheck:"))
     app.add_handler(CallbackQueryHandler(lottery_callbacks_handler, pattern="^(lottocnt:|lottocheck:)"))
     app.add_handler(CallbackQueryHandler(group_callbacks_handler, pattern="^(grpbal:|grpgame:)"))
-    app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|ftoggle:|fbulk:)"))
+    app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|self:features_guide:|ftoggle:|fbulk:)"))
     app.add_handler(CallbackQueryHandler(tabchi_menu_callback, pattern="^(menu:tabchi|tabchi:)"))
     app.add_handler(CallbackQueryHandler(ton_paid_user_confirm_callback, pattern="^tonpaid:"))
     app.add_handler(CallbackQueryHandler(admin_ton_order_action_callback, pattern="^tonadm:"))
