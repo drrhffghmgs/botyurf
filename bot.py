@@ -33,6 +33,9 @@ import threading
 import requests
 import io
 import tempfile
+import math
+import random
+import secrets
 from flask import Flask, jsonify
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
@@ -287,6 +290,12 @@ SELF_DARK_FEATURES = {
     "f38": {"title": "۳۸. ساخت فونت انگلیسی و فارسی", "type": "toggle", "desc": "زیباسازی متن با دستور .font"},
     "f39": {"title": "۳۹. شکارچی تگ و منشن", "type": "toggle", "desc": "ثبت منشن‌های گروه بدون ارسال پیام مزاحم در Saved Messages"},
     "f40": {"title": "۴۰. پاکسازی سریع پیام‌ها (Purge)", "type": "toggle", "desc": "حذف سریع پیام‌های چت با دستور .del"},
+    # قابلیت‌های پیشرفته اضافه شده به بخش قابلیت‌های سلف (با پنل مرکزی به عنوان آخرین قابلیت)
+    "f41": {"title": "۴۱. کامنت اول خودکار کانال (با تنظیم کامنت اول)", "type": "toggle_val", "val_key": "first_comment_word", "val_label": "کلمه کامنت اول (زیر آن به انگلیسی Self Dark نوشته می‌شود)", "default_val": "کامنت اول"},
+    "f42": {"title": "۴۲. عضویت اجباری پیوی (حداکثر ۳ کانال)", "type": "toggle_panel", "panel_cb": "pvforce:menu", "desc": "حذف سریع پیام پیوی افراد عضو نشده و ارسال دکمه‌های شیشه‌ای کانال‌ها"},
+    "f43": {"title": "۴۳. ساخت قرعه‌کشی برای کانال", "type": "action_only", "action_cb": "lotto:start", "style": "success", "emoji_key": "gift"},
+    "f44": {"title": "۴۴. ساخت دکمه شیشه‌ای برای کانال", "type": "action_only", "action_cb": "chbtn:start", "style": "primary", "emoji_key": "sparkles"},
+    "f45": {"title": "۴۵. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت)", "type": "action_only", "action_cb": "self:central_panel", "style": "primary", "emoji_key": "crown"},
 }
 
 def get_default_features_dict() -> dict:
@@ -401,6 +410,82 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 PRIMARY KEY (code, user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                message_text TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                admin_reply TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL,
+                answered_at TEXT DEFAULT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS self_activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target_title TEXT DEFAULT '',
+                detail TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS first_comment_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                chat_title TEXT DEFAULT 'گروه متصل به کانال',
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, chat_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pv_force_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                channel_id TEXT NOT NULL,
+                channel_link TEXT NOT NULL,
+                title TEXT DEFAULT 'کانال عضویت اجباری پیوی',
+                UNIQUE(user_id, channel_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS group_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                creator_id INTEGER NOT NULL,
+                creator_name TEXT DEFAULT 'کاربر',
+                bet_amount INTEGER NOT NULL,
+                status TEXT DEFAULT 'waiting',
+                opponent_id INTEGER DEFAULT NULL,
+                opponent_name TEXT DEFAULT NULL,
+                winner_id INTEGER DEFAULT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_lotteries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                min_participants INTEGER DEFAULT 0,
+                max_participants INTEGER DEFAULT 0,
+                force_channels_json TEXT DEFAULT '[]',
+                description TEXT DEFAULT '',
+                duration_minutes INTEGER NOT NULL,
+                winners_count INTEGER DEFAULT 1,
+                target_channel TEXT NOT NULL,
+                channel_message_id INTEGER DEFAULT NULL,
+                status TEXT DEFAULT 'draft',
+                end_time TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS lottery_participants (
+                lottery_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                joined_at TEXT NOT NULL,
+                PRIMARY KEY (lottery_id, user_id)
+            );
         """)
 
         default_settings = {
@@ -441,6 +526,27 @@ def set_setting(key: str, value: str):
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+def calc_transfer_fee(amount: int) -> tuple[int, int]:
+    """محاسبه کارمزد ۱۰ درصد انتقال الماس (در ربات و در گروه) که از انتقال‌دهنده کسر می‌شود"""
+    fee = max(1, int(math.ceil(amount * 0.10)))
+    total_deduct = amount + fee
+    return fee, total_deduct
+
+def log_self_activity(user_id: int, action_type: str, target_title: str = "", detail: str = ""):
+    """ثبت لحظه‌ای فعالیت‌های ۲۴ ساعت گذشته اکانت کاربر برای نمایش در پنل مرکزی سلف دارک"""
+    try:
+        now_iso = datetime.now().isoformat()
+        cutoff_iso = (datetime.now() - timedelta(hours=36)).isoformat()
+        with closing(get_conn()) as conn, conn:
+            conn.execute(
+                "INSERT INTO self_activity_logs (user_id, action_type, target_title, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, action_type, (target_title or "")[:120], (detail or "")[:200], now_iso)
+            )
+            if random.random() < 0.05:
+                conn.execute("DELETE FROM self_activity_logs WHERE created_at < ?", (cutoff_iso,))
+    except Exception as e:
+        logger.debug(f"Activity log error: {e}")
 
 def get_or_create_user(user_id: int, username: str = "", first_name: str = "", invited_by: int = None):
     with closing(get_conn()) as conn, conn:
@@ -655,6 +761,28 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
         if event.out and event.raw_text:
             txt = event.raw_text.strip()
 
+            # ثبت فعالیت‌های ۲۴ ساعت گذشته کاربر برای «پنل مرکزی»
+            try:
+                if event.is_group:
+                    chat_obj = await event.get_chat()
+                    g_title = getattr(chat_obj, "title", "گروه") or "گروه"
+                    log_self_activity(user_id, "group_msg_out", g_title, txt[:80])
+                elif event.is_private:
+                    chat_obj = await event.get_chat()
+                    if getattr(chat_obj, "bot", False):
+                        b_name = getattr(chat_obj, "first_name", "") or "ربات"
+                        b_user = getattr(chat_obj, "username", "")
+                        b_label = f"{b_name} (@{b_user})" if b_user else b_name
+                        if txt.startswith("/start"):
+                            log_self_activity(user_id, "bot_start", b_label, txt[:80])
+                        else:
+                            log_self_activity(user_id, "bot_msg_out", b_label, txt[:80])
+                    else:
+                        p_name = getattr(chat_obj, "first_name", "") or "مخاطب"
+                        log_self_activity(user_id, "pv_msg_out", p_name, txt[:80])
+            except Exception:
+                pass
+
             # دستور همگام‌سازی مستقیم ساعت پروفایل با ساعت گوشی کاربر: «.ساعت 14:30»
             if txt.startswith(".ساعت ") or txt.startswith(".clock "):
                 arg_t = normalize_digits(txt.split(" ", 1)[1].strip())
@@ -666,8 +794,37 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     feats["f4"] = True
                     save_user_features(user_id, feats)
                     await update_user_profile_clock_now(user_id, client, force=True)
+                    log_self_activity(user_id, "self_cmd", "تنظیم ساعت زنده", f"{hh:02d}:{mm:02d}")
                     await event.edit(f"⏰ <b>ساعت پروفایل با ساعت دستگاه شما (<code>{hh:02d}:{mm:02d}</code>) تنظیم و فعال شد!</b>\nاز این پس هر دقیقه به‌صورت دقیق بروزرسانی می‌شود.", parse_mode="html")
                     return
+
+            # دستور فعال‌سازی «کامنت اول» در گروه متصل به کانال: «تنظیم کامنت اول»
+            if txt == "تنظیم کامنت اول" and (event.is_group or event.is_channel):
+                chat = await event.get_chat()
+                title = getattr(chat, "title", "گروه متصل به کانال")
+                with closing(get_conn()) as conn, conn:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO first_comment_groups (user_id, chat_id, chat_title, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (user_id, event.chat_id, title, datetime.now().isoformat())
+                    )
+                feats["f41"] = True
+                save_user_features(user_id, feats)
+                fc_word = feats.get("first_comment_word", "کامنت اول")
+                log_self_activity(user_id, "self_cmd", "تنظیم کامنت اول", title)
+                await event.edit(
+                    f"🥇 <b>گروه «{html.escape(title)}» با موفقیت برای قابلیت کامنت اول ثبت شد!</b>\n"
+                    f"✨ متن کامنت اول فعلی: <b>{html.escape(fc_word)}</b> (با امضای <code>Self Dark</code>)\n"
+                    f"📌 به محض ارسال پست جدید در کانال متصل به این گروه، کامنت اول به صورت خودکار ثبت می‌شود.",
+                    parse_mode="html"
+                )
+                return
+
+            if txt == "حذف کامنت اول" and (event.is_group or event.is_channel):
+                with closing(get_conn()) as conn, conn:
+                    conn.execute("DELETE FROM first_comment_groups WHERE user_id=? AND chat_id=?", (user_id, event.chat_id))
+                await event.edit("🗑 <b>قابلیت کامنت اول برای این گروه غیرفعال و حذف شد.</b>", parse_mode="html")
+                return
 
             # دستور ثبت گروه در تبچی هوشمند سلف دارک: «تنظیم چت»
             if txt == "تنظیم چت" and (event.is_group or event.is_channel):
@@ -679,6 +836,7 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                            VALUES (?, ?, ?, 1, 10, 3)""",
                         (user_id, event.chat_id, title)
                     )
+                log_self_activity(user_id, "self_cmd", "ثبت گروه تبچی", title)
                 await event.edit(f"✅ <b>گروه «{html.escape(title)}» با موفقیت در تبچی هوشمند سلف دارک ثبت شد!</b>\n⚙️ از داخل ربات سلف دارک می‌توانید بنر و زمان ارسال آن را مدیریت کنید.", parse_mode="html")
                 return
 
@@ -694,6 +852,7 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                     t0 = time.time()
                     await event.edit("🌑 Pong...")
                     ms = int((time.time() - t0) * 1000)
+                    log_self_activity(user_id, "self_cmd", ".ping", f"{ms}ms")
                     await event.edit(f"🌑 <b>Self Dark Online!</b>\n⚡ سرعت پاسخ: <code>{ms}ms</code>", parse_mode="html")
                     return
                 elif txt == ".id":
@@ -816,6 +975,27 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
 
         # پردازش پیام‌های ورودی از دیگران (Incoming Messages)
         if not event.out:
+            # ۴۱. قابلیت «کامنت اول خودکار» در گروه‌های متصل به کانال
+            if feats.get("f41") and (event.is_group or event.is_channel):
+                fwd = getattr(event.message, "fwd_from", None)
+                is_channel_auto_post = bool(
+                    fwd and (getattr(fwd, "saved_from_peer", None) is not None or getattr(fwd, "channel_post", None) is not None)
+                )
+                if is_channel_auto_post:
+                    with closing(get_conn()) as conn:
+                        fc_row = conn.execute(
+                            "SELECT * FROM first_comment_groups WHERE user_id=? AND chat_id=?",
+                            (user_id, event.chat_id)
+                        ).fetchone()
+                    if fc_row:
+                        fc_word = str(feats.get("first_comment_word", "کامنت اول")).strip() or "کامنت اول"
+                        comment_body = f"{fc_word}\nSelf Dark"
+                        try:
+                            await event.reply(comment_body)
+                            log_self_activity(user_id, "first_comment", fc_row["chat_title"], fc_word)
+                        except Exception as e:
+                            logger.debug(f"First comment error: {e}")
+
             # ۱۷. سنجاق خودکار پیام‌های مهم
             if feats.get("f17") and event.raw_text and ("مهم" in event.raw_text or "#مهم" in event.raw_text):
                 try:
@@ -836,6 +1016,88 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 )
 
                 if is_real_human_account:
+                    s_name = getattr(sender, "first_name", "کاربر") or "کاربر"
+                    log_self_activity(user_id, "pv_msg_in", s_name, (event.raw_text or "[مدیا]")[:80])
+
+                    # ۴۲. قابلیت «عضویت اجباری پیوی» (حداکثر ۳ کانال که ربات در آن‌ها ادمین است)
+                    if feats.get("f42") and BOT_APP_REF is not None:
+                        with closing(get_conn()) as conn:
+                            pv_chs = conn.execute(
+                                "SELECT * FROM pv_force_channels WHERE user_id=? LIMIT 3",
+                                (user_id,)
+                            ).fetchall()
+                        if pv_chs:
+                            not_joined_pv = []
+                            for pch in pv_chs:
+                                try:
+                                    m_info = await BOT_APP_REF.bot.get_chat_member(chat_id=pch["channel_id"], user_id=sender.id)
+                                    if m_info.status in ("left", "kicked"):
+                                        not_joined_pv.append(pch)
+                                except Exception:
+                                    not_joined_pv.append(pch)
+
+                            if not_joined_pv:
+                                # ۱. حذف سریع پیام فرستنده در پیوی
+                                try:
+                                    await event.delete()
+                                except Exception:
+                                    pass
+
+                                log_self_activity(user_id, "pv_force_block", s_name, f"{len(not_joined_pv)} کانال عضو نشده")
+
+                                # ۲. ارسال اخطار عضویت اجباری پیوی (حداکثر هر ۳۰ ثانیه یک بار برای جلوگیری از اسپم)
+                                now_ts = time.time()
+                                last_pv_warn = AUTOREPLY_COOLDOWN.get((user_id, -sender.id), 0.0)
+                                if (now_ts - last_pv_warn) >= 25.0:
+                                    AUTOREPLY_COOLDOWN[(user_id, -sender.id)] = now_ts
+                                    try:
+                                        bot_me = await BOT_APP_REF.bot.get_me()
+                                        # تلاش برای ارسال مستقیم دکمه‌های شیشه‌ای رنگی از طریق Inline ربات در پیوی
+                                        sent_inline = False
+                                        try:
+                                            q_res = await client.inline_query(bot_me.username, f"pvforce:{user_id}:{sender.id}")
+                                            if q_res:
+                                                await q_res[0].click(event.chat_id)
+                                                sent_inline = True
+                                        except Exception:
+                                            sent_inline = False
+
+                                        # همچنین ارسال کیبورد شیشه‌ای رنگی از طریق ربات و پیام راهنما در پیوی در صورت غیرفعال بودن Inline
+                                        pv_rows = [
+                                            [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
+                                            for c in not_joined_pv
+                                        ]
+                                        pv_rows.append([
+                                            p_btn("✅ بررسی عضویت", callback_data=f"pvcheck:{user_id}", style="success", emoji_key="check")
+                                        ])
+                                        try:
+                                            await BOT_APP_REF.bot.send_message(
+                                                chat_id=sender.id,
+                                                text=p_text(
+                                                    "⚠️ <b>قفل عضویت اجباری پیوی فعال است!</b>\n\n"
+                                                    "برای پیام دادن به این کاربر ابتدا باید در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ بررسی عضویت»</b> را بزنید:"
+                                                ),
+                                                parse_mode=ParseMode.HTML,
+                                                reply_markup=InlineKeyboardMarkup(pv_rows)
+                                            )
+                                        except Exception:
+                                            pass
+
+                                        if not sent_inline:
+                                            ch_lines = "\n".join([f"🔹 <a href=\"{html.escape(c['channel_link'])}\">عضویت در {html.escape(c['title'])}</a>" for c in not_joined_pv])
+                                            verify_url = f"https://t.me/{bot_me.username}?start=pvcheck_{user_id}"
+                                            await client.send_message(
+                                                event.chat_id,
+                                                f"⚠️ <b>برای پیام دادن به این کاربر ابتدا باید عضو این کانال‌ها بشی:</b>\n\n"
+                                                f"{ch_lines}\n\n"
+                                                f"✅ <a href=\"{verify_url}\">بررسی عضویت و باز کردن قفل پیوی (کلیک کنید)</a>",
+                                                parse_mode="html",
+                                                link_preview=False
+                                            )
+                                    except Exception as e:
+                                        logger.debug(f"PV force warn error: {e}")
+                                return
+
                     # ۲۴. پیشنهاد هوشمند شکلک / ری‌اکشن خودکار (فقط پیوی اکانت‌ها)
                     if feats.get("f24"):
                         emj = feats.get("auto_react_emoji", "🔥")
@@ -1050,7 +1312,7 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
         ],
         [
             p_btn("حساب کاربری من", callback_data="menu:profile", style="primary", emoji_key="star"),
-            p_btn("راهنمای کامل سلف دارک", callback_data="menu:help", style="primary", emoji_key="zap"),
+            p_btn("راهنما و پشتیبانی", callback_data="menu:help", style="primary", emoji_key="zap"),
         ],
     ]
     if is_admin(user_id):
@@ -1060,7 +1322,7 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
-    """صفحه‌بندی ۴۰ قابلیت سلف دارک (هر صفحه ۱۰ قابلیت با دکمه‌های آبی، سبز و قرمز)"""
+    """صفحه‌بندی قابلیت‌های سلف دارک (شامل کامنت اول، عضویت اجباری پیوی، ساخت قرعه‌کشی، ساخت دکمه شیشه‌ای و در آخر پنل مرکزی)"""
     feats = get_user_features(user_id)
     keys = list(SELF_DARK_FEATURES.keys())
     per_page = 10
@@ -1068,15 +1330,43 @@ def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup
     page = max(0, min(page, total_pages - 1))
     slice_keys = keys[page * per_page : (page + 1) * per_page]
 
-    rows = []
+    rows = [
+        [
+            p_btn("🎁 ساخت قرعه‌کشی کانال", callback_data="lotto:start", style="success", emoji_key="gift"),
+            p_btn("✨ ساخت دکمه شیشه‌ای کانال", callback_data="chbtn:start", style="primary", emoji_key="sparkles"),
+        ],
+        [
+            p_btn("🛡 عضویت اجباری پیوی", callback_data="pvforce:menu", style="primary", emoji_key="zap"),
+            p_btn("📊 پنل مرکزی (گزارش ۲۴ ساعته)", callback_data="self:central_panel", style="primary", emoji_key="crown"),
+        ],
+    ]
     for k in slice_keys:
         meta = SELF_DARK_FEATURES[k]
-        is_on = feats.get(k, False)
-        status_str = "🟢 روشن" if is_on else "🔴 خاموش"
-        btn_style = "success" if is_on else "primary"
-        row = [p_btn(f"{meta['title']} ({status_str})", callback_data=f"ftoggle:{k}:{page}", style=btn_style)]
-        if "val_key" in meta:
-            row.append(p_btn("⚙️ تنظیم مقدار", callback_data=f"fsetval:{k}:{page}", style="primary"))
+        ftype = meta.get("type", "toggle")
+        if ftype == "action_only":
+            row = [
+                p_btn(
+                    meta["title"],
+                    callback_data=meta["action_cb"],
+                    style=meta.get("style", "primary"),
+                    emoji_key=meta.get("emoji_key", "sparkles")
+                )
+            ]
+        elif ftype == "toggle_panel":
+            is_on = feats.get(k, False)
+            status_str = "🟢 روشن" if is_on else "🔴 خاموش"
+            btn_style = "success" if is_on else "primary"
+            row = [
+                p_btn(f"{meta['title']} ({status_str})", callback_data=f"ftoggle:{k}:{page}", style=btn_style),
+                p_btn("⚙️ مدیریت کانال‌ها", callback_data=meta["panel_cb"], style="primary"),
+            ]
+        else:
+            is_on = feats.get(k, False)
+            status_str = "🟢 روشن" if is_on else "🔴 خاموش"
+            btn_style = "success" if is_on else "primary"
+            row = [p_btn(f"{meta['title']} ({status_str})", callback_data=f"ftoggle:{k}:{page}", style=btn_style)]
+            if "val_key" in meta:
+                row.append(p_btn("⚙️ تنظیم مقدار", callback_data=f"fsetval:{k}:{page}", style="primary"))
         rows.append(row)
 
     nav_row = []
@@ -1214,7 +1504,25 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
     ADM_WAIT_GIFT_WORD,
     ADM_WAIT_GIFT_DIAMONDS,
     ADM_WAIT_GIFT_CAPACITY,
-) = range(23)
+    TICKET_WAIT_MESSAGE,
+    ADM_WAIT_TICKET_REPLY,
+    PVFORCE_WAIT_CHANNEL,
+    LOTTO_WAIT_TITLE,
+    LOTTO_WAIT_MIN,
+    LOTTO_WAIT_MAX,
+    LOTTO_WAIT_FCH,
+    LOTTO_WAIT_DESC,
+    LOTTO_WAIT_DURATION,
+    LOTTO_WAIT_WINNERS,
+    LOTTO_WAIT_CHANNEL,
+    LOTTO_WAIT_CONFIRM,
+    CHBTN_WAIT_CONTENT,
+    CHBTN_WAIT_LINK,
+    CHBTN_WAIT_NAME,
+    CHBTN_WAIT_COLOR,
+    CHBTN_WAIT_CHANNEL,
+    CHBTN_WAIT_CONFIRM,
+) = range(41)
 
 # ====================================================================
 #  هندلر شروع (/start) و منوهای اصلی سلف دارک
@@ -1239,6 +1547,20 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_setting("bot_active", "1") == "0" and not is_admin(user.id):
         await update.message.reply_text(p_text("⏳ ربات سلف دارک موقتاً در حال بروزرسانی است."), parse_mode=ParseMode.HTML)
         return
+
+    # بررسی لینک‌های اختصاصی (شرکت در قرعه‌کشی کانال یا بررسی عضویت اجباری پیوی)
+    if context.args and len(context.args) > 0:
+        arg = context.args[0]
+        if arg.startswith("lotto_"):
+            lotto_id_str = arg.replace("lotto_", "").strip()
+            if lotto_id_str.isdigit():
+                await handle_lottery_join_attempt(update, context, user, int(lotto_id_str), is_callback=False)
+                return
+        elif arg.startswith("pvcheck_"):
+            owner_id_str = arg.replace("pvcheck_", "").strip()
+            if owner_id_str.isdigit():
+                await handle_pv_force_verify(update, context, user, int(owner_id_str), is_callback=False)
+                return
 
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
@@ -1435,49 +1757,94 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     elif data == "menu:help":
+        text = p_text(
+            "📚 <b>بخش راهنما و پشتیبانی «سلف دارک | Self Dark»</b>\n\n"
+            "✨ لطفاً یکی از دو بخش زیر را انتخاب کنید:\n\n"
+            "🔹 <b>راهنمای کامل:</b> آموزش فعال‌سازی سلف، دستورات گروهی (موجودی، بازی، انتقال، کامنت اول) و قابلیت‌های سلف دارک\n"
+            "🔹 <b>پشتیبانی:</b> ارتباط مستقیم با آیدی پشتیبانی یا ثبت تیکت در داخل ربات"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                p_btn("📚 راهنما (آموزش کامل ربات و گروه)", callback_data="menu:help_guide", style="primary", emoji_key="zap"),
+            ],
+            [
+                p_btn("🎧 پشتیبانی (پیام مستقیم / ثبت تیکت)", callback_data="menu:support", style="success", emoji_key="rocket"),
+            ],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "menu:support":
+        sup_id = get_setting("rial_support_id", "@kanfingfreesup")
+        sup_url = f"https://t.me/{sup_id.lstrip('@')}"
+        with closing(get_conn()) as conn:
+            open_t = conn.execute("SELECT id, created_at FROM tickets WHERE user_id=? AND status='open'", (user.id,)).fetchone()
+
+        ticket_st = (
+            f"🟡 شما یک تیکت باز (#{open_t['id']}) در انتظار پاسخ ادمین دارید."
+            if open_t else "🟢 شما هیچ تیکت بی‌پاسخی ندارید و می‌توانید تیکت جدید ثبت کنید."
+        )
+        text = p_text(
+            f"🎧 <b>مرکز پشتیبانی «سلف دارک | Self Dark»</b>\n\n"
+            f"برای ارتباط با پشتیبانی ۲ روش در اختیار شماست:\n\n"
+            f"1️⃣ <b>روش اول (ارتباط مستقیم با آیدی پشتیبانی):</b>\n"
+            f"• می‌توانید مستقیماً به آیدی پشتیبانی پیام دهید: <b>{sup_id}</b>\n\n"
+            f"2️⃣ <b>روش دوم (ثبت تیکت در داخل ربات):</b>\n"
+            f"• مشکل یا سوال خود را به صورت تیکت ثبت کنید تا مستقیماً برای ادمین ارسال شود و در همین ربات پاسخ بگیرید.\n"
+            f"📌 <i>توجه: تا زمانی که تیکت قبلی شما توسط ادمین پاسخ داده نشده باشد، امکان ثبت تیکت جدید وجود ندارد.</i>\n\n"
+            f"📊 وضعیت تیکت شما: {ticket_st}"
+        )
+        kb = InlineKeyboardMarkup([
+            [p_btn(f"💬 پیام مستقیم به پشتیبانی ({sup_id})", url=sup_url, style="primary", emoji_key="rocket")],
+            [p_btn("📩 ثبت تیکت جدید در ربات", callback_data="support:new_ticket", style="success", emoji_key="sparkles")],
+            [p_btn("⬅️ بازگشت به راهنما و پشتیبانی", callback_data="menu:help", style="primary", emoji_key="zap")],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "menu:help_guide":
         act_c = get_setting("activation_cost", "30")
         hr_c = get_setting("hourly_cost", "3")
         ref_r = get_setting("referral_reward", "5")
         ton_r = get_setting("ton_per_diamond", "0.0005")
+        min_tr = get_setting("min_transfer_diamonds", "50")
         extra_note = get_setting("help_extra_note", "")
 
         help_text = p_text(
-            f"📚 <b>راهنمای جامع ربات «سلف دارک | Self Dark»</b>\n\n"
+            f"📚 <b>راهنمای جامع ربات و قابلیت‌های گروهی «سلف دارک | Self Dark»</b>\n\n"
             f"🌑 <b>۱. نحوه فعال‌سازی سلف دارک:</b>\n"
             f"• ابتدا از داشتن حداقل <b>{act_c} الماس</b> در حساب خود مطمئن شوید.\n"
-            f"• وارد بخش <b>«🚀 فعالسازی و اتصال سلف دارک»</b> شوید.\n"
-            f"• روی دکمه <b>«📱 ارسال شماره تلگرام من»</b> بزنید تا شماره اکانتتان ارسال شود.\n"
-            f"• کد ۵ رقمی تلگرام را با فاصله یا خط تیره (مثلاً <code>1-2-3-4-5</code>) بفرستید تا تلگرام کد را مسدود نکند.\n"
-            f"• اگر رمز دو مرحله‌ای (2FA) دارید، آن را نیز وارد کنید تا سلف دارک بلافاصله روی اکانت شما روشن شود!\n\n"
-            f"💎 <b>۲. سیستم الماس و هزینه‌ها:</b>\n"
-            f"• هزینه فعال‌سازی اولیه سلف دارک: <b>{act_c} الماس</b>\n"
-            f"• هزینه روشن ماندن سلف دارک: <b>ساعتی {hr_c} الماس</b>\n"
-            f"• خرید با ارز دیجیتال TON: هر الماس <b>{ton_r} TON</b> (حداقل ۵۰ الماس)\n"
-            f"• خرید کارت به کارت ریالی: پیام به {get_setting('rial_support_id', '@kanfingfreesup')}\n"
-            f"• زیرمجموعه‌گیری: هر زیرمجموعه که در کانال‌های اجباری عضو شود = <b>{ref_r} الماس رایگان</b>\n\n"
-            f"📣 <b>۳. راهنمای تبچی هوشمند سلف دارک:</b>\n"
-            f"• بعد از روشن شدن سلف دارک، در هر گروهی که می‌خواهید تبچی پیام بفرستد، عبارت <code>تنظیم چت</code> را با اکانت خود ارسال کنید تا گروه ثبت شود.\n"
-            f"• برای حذف گروه، عبارت <code>حذف چت</code> را در گروه بفرستید.\n"
-            f"• از منوی <b>«📣 تبچی هوشمند سلف دارک»</b> در همین ربات می‌توانید بنر اختصاصی، زمان ارسال برحسب دقیقه، فاصله بین پیام‌ها و روشن/خاموش بودن هر گروه را تنظیم کنید.\n\n"
-            f"⚡ <b>۴. دستورات کاربردی داخل اکانت سلف دارک:</b>\n"
-            f"• <code>.ping</code> (بررسی سرعت) | <code>.stats</code> (آمار سلف) | <code>.id</code> (آیدی عددی)\n"
-            f"• <code>.tr</code> (ترجمه با ریپلای) | <code>.sum</code> (خلاصه‌سازی با ریپلای)\n"
-            f"• <code>.calc 2+2</code> (ماشین حساب) | <code>.font text</code> (زیباسازی فونت)\n"
-            f"• <code>.note متن</code> (ثبت یادداشت گفتگو) | <code>.notebook</code> (مشاهده دفترچه)\n"
-            f"• <code>.del 5</code> (پاکسازی سریع پیام‌ها)\n\n"
+            f"• وارد بخش <b>«🚀 فعالسازی و اتصال سلف دارک»</b> شوید و شماره و کد ۵ رقمی تلگرام را وارد کنید.\n\n"
+            f"💎 <b>۲. سیستم الماس، انتقال و کارمزد:</b>\n"
+            f"• هزینه فعال‌سازی اولیه سلف: <b>{act_c} الماس</b> | هزینه ساعتی: <b>{hr_c} الماس</b>\n"
+            f"• خرید با TON: هر الماس <b>{ton_r} TON</b> | کارت به کارت: {get_setting('rial_support_id', '@kanfingfreesup')}\n"
+            f"• انتقال الماس: حداقل انتقال <b>{min_tr} الماس</b> با <b>۱۰٪ کارمزد</b> که از انتقال‌دهنده کسر می‌شود.\n\n"
+            f"👥 <b>۳. راهنمای کامل قابلیت‌های گروهی (Group Features):</b>\n"
+            f"• <b>مشاهده موجودی در گروه:</b> کافی است در گروه کلمه <code>موجودی</code> را بفرستید تا موجودی الماس شما داخل یک <b>دکمه شیشه‌ای آبی رنگ</b> نمایش داده شود.\n"
+            f"• <b>ساخت بازی دو نفره شرطی:</b> در گروه بنویسید <code>بازی [مبلغ]</code> (مثال: <code>بازی 60</code>). حداقل مبلغ شرط <b>۱۵ الماس</b> است. یک بازی با دکمه شیشه‌ای رنگی ساخته می‌شود که فقط خود شما و ۱ نفر دیگر می‌توانید شرکت کنید؛ به محض ورود نفر دوم، ربات به صورت کاملاً تصادفی برنده را انتخاب کرده و <b>۲ برابر مبلغ شرط</b> را به برنده جایزه می‌دهد!\n"
+            f"• <b>انتقال الماس با ریپلای در گروه:</b> روی پیام هر کاربری در گروه ریپلای کنید و بنویسید <code>انتقال [مبلغ]</code> (مثال: <code>انتقال 50</code>)؛ الماس بلافاصله با کسر ۱۰٪ کارمزد از حساب شما به حساب او منتقل شده و در پیوی ربات هم برایش نوتیفیکیشن ارسال می‌شود.\n\n"
+            f"🥇 <b>۴. کامنت اول، عضویت اجباری پیوی، قرعه‌کشی و پنل مرکزی:</b>\n"
+            f"• <b>کامنت اول خودکار:</b> در گروهی که به کانال متصل است عبارت <code>تنظیم کامنت اول</code> را بفرستید؛ به محض انتشار پست جدید در کانال، کلمه کامنت اول شما به همراه امضای <code>Self Dark</code> زیر پست ارسال می‌شود (قابل تغییر از بخش قابلیت‌های سلف).\n"
+            f"• <b>عضویت اجباری پیوی:</b> از بخش قابلیت‌های سلف تا حداکثر ۳ کانال (که ربات در آن‌ها ادمین است) ثبت کنید تا هر کسی در پیوی پیام داد و عضو نبود، پیامش فوراً حذف شده و دکمه شیشه‌ای کانال‌ها و بررسی عضویت برایش ارسال شود.\n"
+            f"• <b>ساخت قرعه‌کشی و دکمه شیشه‌ای کانال:</b> از بخش قابلیت‌های سلف می‌توانید قرعه‌کشی زمان‌دار با شمارنده زنده شرکت‌کنندگان و انتخاب خودکار برندگان یا پست شیشه‌ای رنگی در کانال منتشر کنید.\n"
+            f"• <b>پنل مرکزی (آخرین قابلیت سلف):</b> نمایش گزارش کامل تمام فعالیت‌های ۲۴ ساعت گذشته اکانت شما (پیام‌های گروه، پیوی، استارت ربات‌ها و...).\n\n"
+            f"📣 <b>۵. تبچی هوشمند و دستورات سلف:</b>\n"
+            f"• ثبت گروه در تبچی با <code>تنظیم چت</code> و حذف با <code>حذف چت</code>\n"
+            f"• دستورات سلف: <code>.ping</code> | <code>.stats</code> | <code>.id</code> | <code>.tr</code> | <code>.sum</code> | <code>.calc</code> | <code>.font</code> | <code>.del</code>\n\n"
             f"{html.escape(extra_note)}"
         )
         kb = InlineKeyboardMarkup([
             [
-                p_btn("فعالسازی سلف دارک", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
-                p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+                p_btn("🎧 بخش پشتیبانی و ثبت تیکت", callback_data="menu:support", style="success", emoji_key="rocket"),
+                p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="primary", emoji_key="gem"),
             ],
+            [p_btn("⬅️ بازگشت به راهنما و پشتیبانی", callback_data="menu:help", style="primary", emoji_key="zap")],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(help_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ====================================================================
-#  مدیریت ۴۰ قابلیت سلف دارک (روشن/خاموش و تغییر مقادیر)
+#  مدیریت قابلیت‌های سلف دارک (روشن/خاموش، تغییر مقادیر و پنل مرکزی)
 # ====================================================================
 
 async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1490,9 +1857,9 @@ async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_
         await query.answer()
         await query.edit_message_text(
             p_text(
-                "🌑 <b>پنل تنظیمات ۴۰ قابلیت «سلف دارک | Self Dark»</b>\n\n"
+                "🌑 <b>پنل تنظیمات قابلیت‌های «سلف دارک | Self Dark»</b>\n\n"
                 "✨ روی هر قابلیت کلیک کنید تا <b>🟢 روشن</b> یا <b>🔴 خاموش</b> شود.\n"
-                "⚙️ قابلیت‌هایی که دکمه «تنظیم مقدار» دارند (مثل متن پاسخ خودکار، قالب بیو، ایموجی ری‌اکشن و...) قابل شخصی‌سازی کامل هستند:"
+                "⚙️ شامل <b>کامنت اول خودکار</b>، <b>عضویت اجباری پیوی</b>، <b>ساخت قرعه‌کشی کانال</b>، <b>ساخت دکمه شیشه‌ای کانال</b> و در آخرین قابلیت <b>پنل مرکزی (گزارش ۲۴ ساعت گذشته)</b>:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=build_features_keyboard(user.id, page)
@@ -2507,14 +2874,15 @@ async def transfer_diamonds_start(update: Update, context: ContextTypes.DEFAULT_
 
     db_user = get_or_create_user(user.id, user.username, user.first_name)
     min_tr = int(get_setting("min_transfer_diamonds", "50"))
+    min_fee, min_total_needed = calc_transfer_fee(min_tr)
 
-    if db_user["diamonds"] < min_tr and not is_admin(user.id):
-        await query.answer(f"⚠️ موجودی شما ({db_user['diamonds']} الماس) کمتر از حداقل انتقال ({min_tr} الماس) است!", show_alert=True)
+    if db_user["diamonds"] < min_total_needed and not is_admin(user.id):
+        await query.answer(f"⚠️ با احتساب ۱۰٪ کارمزد، حداقل به {min_total_needed} الماس نیاز دارید!", show_alert=True)
         await query.edit_message_text(
             p_text(
-                f"💎 <b>انتقال الماس به سایر کاربران</b>\n\n"
+                f"💎 <b>انتقال الماس به سایر کاربران (با ۱۰٪ کارمزد)</b>\n\n"
                 f"⚠️ موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
-                f"🔢 حداقل الماس قابل انتقال: <b>{min_tr} الماس</b>\n\n"
+                f"🔢 حداقل الماس قابل انتقال: <b>{min_tr} الماس</b> (+{min_fee} الماس کارمزد ۱۰٪ = <b>{min_total_needed} الماس</b>)\n\n"
                 f"❌ موجودی شما برای انتقال الماس کافی نیست. ابتدا از طریق فروشگاه یا زیرمجموعه‌گیری موجودی خود را افزایش دهید:"
             ),
             parse_mode=ParseMode.HTML,
@@ -2533,7 +2901,8 @@ async def transfer_diamonds_start(update: Update, context: ContextTypes.DEFAULT_
         p_text(
             f"💎 <b>انتقال الماس به کاربر دیگر (مرحله ۱ از ۲)</b>\n\n"
             f"💰 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
-            f"🔢 حداقل تعداد قابل انتقال: <b>{min_tr} الماس</b>\n\n"
+            f"🔢 حداقل تعداد قابل انتقال: <b>{min_tr} الماس</b>\n"
+            f"💸 کارمزد انتقال: <b>۱۰ درصد</b> (از حساب انتقال‌دهنده کسر می‌شود)\n\n"
             f"👇 لطفاً <b>آیدی عددی (Numeric ID)</b> کاربری که می‌خواهید برای او الماس بفرستید را وارد کنید:\n"
             f"<i>(مثال: <code>123456789</code>)</i>"
         ),
@@ -2587,9 +2956,9 @@ async def transfer_receive_target_id(update: Update, context: ContextTypes.DEFAU
         p_text(
             f"💎 <b>انتقال الماس به کاربر دیگر (مرحله ۲ از ۲)</b>\n\n"
             f"🎯 آیدی عددی گیرنده: <code>{target_id}</code> ({target_info})\n"
-            f"💰 موجودی قابل انتقال شما: <b>{db_user['diamonds']} الماس</b>\n"
-            f"🔢 حداقل انتقال مجاز: <b>{min_tr} الماس</b>\n\n"
-            f"👇 لطفاً <b>تعداد الماسی</b> که می‌خواهید انتقال دهید را وارد کنید (حداقل <code>{min_tr}</code>):"
+            f"💰 موجودی شما: <b>{db_user['diamonds']} الماس</b>\n"
+            f"🔢 حداقل انتقال مجاز: <b>{min_tr} الماس</b> (کارمزد: <b>۱۰٪</b>)\n\n"
+            f"👇 لطفاً <b>تعداد الماسی</b> که می‌خواهید به گیرنده برسد را وارد کنید (حداقل <code>{min_tr}</code>):"
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=cancel_inline_keyboard("menu:main")
@@ -2635,13 +3004,16 @@ async def transfer_receive_amount(update: Update, context: ContextTypes.DEFAULT_
         )
         return TRANSFER_WAIT_AMOUNT
 
+    fee, total_deduct = calc_transfer_fee(amount)
     db_user = get_or_create_user(user.id, user.username, user.first_name)
-    if db_user["diamonds"] < amount:
+    if db_user["diamonds"] < total_deduct:
         await update.message.reply_text(
             p_text(
-                f"❌ موجودی شما کافی نیست!\n"
-                f"💎 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
-                f"🔢 مقدار درخواستی: <b>{amount} الماس</b>\n\n"
+                f"❌ موجودی شما با احتساب ۱۰٪ کارمزد کافی نیست!\n\n"
+                f"💎 مبلغ انتقال به گیرنده: <b>{amount:,} الماس</b>\n"
+                f"💸 کارمزد انتقال (۱۰٪): <b>{fee:,} الماس</b>\n"
+                f"🔢 مجموع قابل کسر از شما: <b>{total_deduct:,} الماس</b>\n"
+                f"💰 موجودی فعلی شما: <b>{db_user['diamonds']:,} الماس</b>\n\n"
                 f"لطفاً مقدار کمتری وارد کنید یا ابتدا حساب خود را شارژ نمایید:"
             ),
             parse_mode=ParseMode.HTML,
@@ -2649,16 +3021,16 @@ async def transfer_receive_amount(update: Update, context: ContextTypes.DEFAULT_
         )
         return TRANSFER_WAIT_AMOUNT
 
-    # تضمین وجود رکورد گیرنده در دیتابیس و انتقال آنی الماس
+    # تضمین وجود رکورد گیرنده در دیتابیس و انتقال آنی الماس با کسر ۱۰٪ کارمزد از فرستنده
     get_or_create_user(target_id)
-    add_user_diamonds(user.id, -amount)
+    add_user_diamonds(user.id, -total_deduct)
     add_user_diamonds(target_id, amount)
 
     updated_sender = get_or_create_user(user.id)
     updated_receiver = get_or_create_user(target_id)
     context.user_data.pop("transfer_target_id", None)
 
-    # اطلاع‌رسانی به گیرنده الماس
+    # اطلاع‌رسانی به گیرنده الماس در ربات
     try:
         await context.bot.send_message(
             chat_id=target_id,
@@ -2678,7 +3050,9 @@ async def transfer_receive_amount(update: Update, context: ContextTypes.DEFAULT_
             f"✅ <b>انتقال الماس با موفقیت انجام شد!</b>\n\n"
             f"📤 فرستنده: <code>{user.id}</code>\n"
             f"📥 گیرنده: <code>{target_id}</code>\n"
-            f"💎 مقدار منتقل‌شده: <b>{amount:,} الماس</b>\n"
+            f"💎 مقدار واریزشده به گیرنده: <b>{amount:,} الماس</b>\n"
+            f"💸 کارمزد انتقال (۱۰٪): <b>{fee:,} الماس</b>\n"
+            f"➖ مجموع کسر شده از شما: <b>{total_deduct:,} الماس</b>\n"
             f"💰 موجودی جدید شما: <b>{updated_sender['diamonds']:,} الماس</b>"
         ),
         parse_mode=ParseMode.HTML,
@@ -3601,6 +3975,1495 @@ async def admin_receive_restore_file(update: Update, context: ContextTypes.DEFAU
     return ConversationHandler.END
 
 # ====================================================================
+#  ۱. سیستم تیکتینگ پشتیبانی (ثبت تیکت توسط کاربر و پاسخ توسط ادمین)
+# ====================================================================
+
+async def support_ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+
+    with closing(get_conn()) as conn:
+        open_t = conn.execute(
+            "SELECT id, created_at FROM tickets WHERE user_id=? AND status='open'",
+            (user.id,)
+        ).fetchone()
+
+    if open_t:
+        await query.answer(
+            f"⚠️ شما یک تیکت باز (#{open_t['id']}) دارید! تا زمانی که ادمین به تیکت قبلی شما پاسخ ندهد نمی‌توانید تیکت جدید ثبت کنید.",
+            show_alert=True
+        )
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_text(
+        p_text(
+            "📩 <b>ثبت تیکت جدید در پشتیبانی سلف دارک</b>\n\n"
+            "✍️ لطفاً مشکل، سوال یا درخواست خود را به صورت کامل در یک پیام بنویسید و ارسال کنید:\n"
+            "<i>(تیکت شما مستقیماً برای مدیریت ربات ارسال می‌شود و به محض پاسخگویی، در همینجا به شما اطلاع داده خواهد شد)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("menu:support")
+    )
+    return TICKET_WAIT_MESSAGE
+
+async def support_ticket_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg_text = (update.message.text or update.message.caption or "").strip()
+
+    if not msg_text:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً متن پیام تیکت خود را ارسال کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:support")
+        )
+        return TICKET_WAIT_MESSAGE
+
+    with closing(get_conn()) as conn, conn:
+        open_t = conn.execute(
+            "SELECT id FROM tickets WHERE user_id=? AND status='open'",
+            (user.id,)
+        ).fetchone()
+        if open_t:
+            await update.message.reply_text(
+                p_text(f"⚠️ شما یک تیکت باز (#{open_t['id']}) در انتظار پاسخ دارید و تا زمان پاسخ ادمین نمی‌توانید تیکت دیگری ثبت کنید."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(user.id)
+            )
+            return ConversationHandler.END
+
+        cur = conn.execute(
+            "INSERT INTO tickets (user_id, message_text, status, created_at) VALUES (?, ?, 'open', ?)",
+            (user.id, msg_text, datetime.now().isoformat())
+        )
+        ticket_id = cur.lastrowid
+
+    # ارسال تیکت برای ادمین ربات با دکمه پاسخگویی مستقیم
+    adm_text = p_text(
+        f"📩 <b>تیکت پشتیبانی جدید (#{ticket_id})</b>\n\n"
+        f"👤 کاربر: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
+        f"🔢 آیدی عددی: <code>{user.id}</code>\n"
+        f"⏰ زمان ثبت: <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
+        f"💬 <b>متن تیکت کاربر:</b>\n{html.escape(msg_text)}"
+    )
+    adm_kb = InlineKeyboardMarkup([
+        [p_btn(f"✍️ پاسخ به تیکت #{ticket_id}", callback_data=f"ticket_reply:{ticket_id}", style="success", emoji_key="sparkles")]
+    ])
+    for adm in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=adm, text=adm_text, parse_mode=ParseMode.HTML, reply_markup=adm_kb)
+        except Exception as e:
+            logger.warning(f"Ticket notify admin error: {e}")
+
+    await update.message.reply_text(
+        p_text(
+            f"✅ <b>تیکت شما با شماره <code>#{ticket_id}</code> با موفقیت ثبت و برای مدیریت ارسال شد!</b>\n\n"
+            f"⏳ لطفاً منتظر پاسخ مدیریت بمانید؛ تا زمان دریافت پاسخ این تیکت، امکان ثبت تیکت جدید وجود ندارد."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+    return ConversationHandler.END
+
+async def admin_ticket_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("⛔ فقط ادمین اصلی دسترسی دارد!", show_alert=True)
+        return ConversationHandler.END
+
+    ticket_id = int(query.data.split(":")[1])
+    with closing(get_conn()) as conn:
+        t = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+
+    if not t:
+        await query.answer("❌ تیکت یافت نشد!", show_alert=True)
+        return ConversationHandler.END
+
+    context.user_data["reply_ticket_id"] = ticket_id
+    await query.answer()
+    await query.message.reply_text(
+        p_text(
+            f"✍️ <b>پاسخ به تیکت #{ticket_id} (کاربر <code>{t['user_id']}</code>)</b>\n\n"
+            f"💬 متن تیکت کاربر:\n<i>{html.escape(t['message_text'][:300])}</i>\n\n"
+            f"👇 لطفاً متن پاسخ خود را ارسال کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("admin:page:0")
+    )
+    return ADM_WAIT_TICKET_REPLY
+
+async def admin_ticket_reply_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    ticket_id = context.user_data.get("reply_ticket_id")
+    reply_txt = (update.message.text or update.message.caption or "").strip()
+    if not ticket_id or not reply_txt:
+        await update.message.reply_text(p_text("⚠️ لطفاً متن پاسخ را وارد کنید:"), parse_mode=ParseMode.HTML)
+        return ADM_WAIT_TICKET_REPLY
+
+    with closing(get_conn()) as conn, conn:
+        t = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+        if not t:
+            await update.message.reply_text(p_text("❌ تیکت یافت نشد."), parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+        conn.execute(
+            "UPDATE tickets SET status='answered', admin_reply=?, answered_at=? WHERE id=?",
+            (reply_txt, datetime.now().isoformat(), ticket_id)
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=t["user_id"],
+            text=p_text(
+                f"🎧 <b>پاسخ پشتیبانی به تیکت شما (#{ticket_id})</b>\n\n"
+                f"❓ <b>تیکت شما:</b>\n<i>{html.escape(t['message_text'][:250])}</i>\n\n"
+                f"✅ <b>پاسخ مدیریت:</b>\n{html.escape(reply_txt)}"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(t["user_id"])
+        )
+    except Exception:
+        pass
+
+    context.user_data.pop("reply_ticket_id", None)
+    await update.message.reply_text(
+        p_text(f"✅ پاسخ تیکت <b>#{ticket_id}</b> با موفقیت برای کاربر <code>{t['user_id']}</code> ارسال شد و وضعیت تیکت بسته شد."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(0)
+    )
+    return ConversationHandler.END
+
+# ====================================================================
+#  ۲. پنل مرکزی (آخرین قابلیت سلف: گزارش کامل فعالیت ۲۴ ساعت گذشته اکانت)
+# ====================================================================
+
+async def central_panel_24h_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    await query.answer("📊 در حال استخراج گزارش ۲۴ ساعت گذشته اکانت شما...")
+
+    cutoff_iso = (datetime.now() - timedelta(hours=24)).isoformat()
+    with closing(get_conn()) as conn:
+        logs = conn.execute(
+            "SELECT * FROM self_activity_logs WHERE user_id=? AND created_at >= ? ORDER BY id DESC",
+            (user.id, cutoff_iso)
+        ).fetchall()
+        fc_cnt = conn.execute("SELECT COUNT(*) c FROM first_comment_groups WHERE user_id=?", (user.id,)).fetchone()["c"]
+        pv_cnt = conn.execute("SELECT COUNT(*) c FROM pv_force_channels WHERE user_id=?", (user.id,)).fetchone()["c"]
+        tb_cnt = conn.execute("SELECT COUNT(*) c FROM tabchi_groups WHERE user_id=?", (user.id,)).fetchone()["c"]
+
+    group_out = [r for r in logs if r["action_type"] == "group_msg_out"]
+    pv_out = [r for r in logs if r["action_type"] == "pv_msg_out"]
+    pv_in = [r for r in logs if r["action_type"] == "pv_msg_in"]
+    bot_starts = [r for r in logs if r["action_type"] == "bot_start"]
+    bot_msgs = [r for r in logs if r["action_type"] == "bot_msg_out"]
+    first_comms = [r for r in logs if r["action_type"] == "first_comment"]
+    pv_blocks = [r for r in logs if r["action_type"] == "pv_force_block"]
+    self_cmds = [r for r in logs if r["action_type"] == "self_cmd"]
+
+    # لیست گروه‌هایی که کاربر در ۲۴ ساعت گذشته در آن‌ها پیام فرستاده
+    unique_groups = []
+    for r in group_out:
+        if r["target_title"] and r["target_title"] not in unique_groups:
+            unique_groups.append(r["target_title"])
+
+    # لیست اشخاصی که کاربر در ۲۴ ساعت گذشته به آن‌ها پیام داده
+    unique_pvs = []
+    for r in pv_out:
+        if r["target_title"] and r["target_title"] not in unique_pvs:
+            unique_pvs.append(r["target_title"])
+
+    # لیست ربات‌هایی که کاربر در ۲۴ ساعت گذشته استارت کرده یا تعامل داشته
+    unique_bots = []
+    for r in (bot_starts + bot_msgs):
+        if r["target_title"] and r["target_title"] not in unique_bots:
+            unique_bots.append(r["target_title"])
+
+    grp_names_str = "، ".join([html.escape(x) for x in unique_groups[:5]]) if unique_groups else "ثبت نشده"
+    pv_names_str = "، ".join([html.escape(x) for x in unique_pvs[:5]]) if unique_pvs else "ثبت نشده"
+    bot_names_str = "، ".join([html.escape(x) for x in unique_bots[:6]]) if unique_bots else "هیچ رباتی استارت نشده"
+
+    recent_lines = []
+    for r in logs[:8]:
+        try:
+            t_str = datetime.fromisoformat(r["created_at"]).strftime("%H:%M")
+        except Exception:
+            t_str = "--:--"
+        act_map = {
+            "group_msg_out": "💬 پیام در گروه",
+            "pv_msg_out": "📤 پیام به شخص",
+            "pv_msg_in": "📥 دریافت پیام پیوی",
+            "bot_start": "🤖 استارت ربات",
+            "bot_msg_out": "🤖 پیام به ربات",
+            "first_comment": "🥇 ثبت کامنت اول",
+            "pv_force_block": "🛡 حذف پیام پیوی (جوین اجباری)",
+            "self_cmd": "⚡ دستور سلف دارک",
+        }
+        lbl = act_map.get(r["action_type"], r["action_type"])
+        recent_lines.append(f"• <code>{t_str}</code> | {lbl}: <b>{html.escape(r['target_title'] or '-')}</b>")
+
+    recent_block = "\n".join(recent_lines) if recent_lines else "• هنوز فعالیتی در ۲۴ ساعت اخیر ثبت نشده است."
+
+    text = p_text(
+        f"👑 <b>پنل مرکزی سلف دارک (گزارش کامل ۲۴ ساعت گذشته اکانت)</b>\n\n"
+        f"📊 <b>خلاصه تمام فعالیت‌های اکانت شما در ۲۴ ساعت اخیر:</b>\n"
+        f"• 💬 پیام‌های ارسالی در گروه‌ها: <b>{len(group_out):,} پیام</b>\n"
+        f"   └ گروه‌های فعال: <i>{grp_names_str}</i>\n"
+        f"• 📤 پیام‌های ارسالی به اشخاص (پیوی): <b>{len(pv_out):,} پیام</b>\n"
+        f"   └ مخاطبین: <i>{pv_names_str}</i>\n"
+        f"• 📥 پیام‌های دریافتی از اشخاص در پیوی: <b>{len(pv_in):,} پیام</b>\n"
+        f"• 🤖 استارت کردن ربات‌ها: <b>{len(bot_starts):,} بار</b> (کل پیام به ربات‌ها: <b>{len(bot_starts) + len(bot_msgs):,}</b>)\n"
+        f"   └ ربات‌های تعامل‌شده: <i>{bot_names_str}</i>\n"
+        f"• 🥇 کامنت‌های اول ارسال شده: <b>{len(first_comms):,} مورد</b> (گروه‌های ثبت‌شده: {fc_cnt})\n"
+        f"• 🛡 پیام‌های مسدودشده عضویت اجباری پیوی: <b>{len(pv_blocks):,} مورد</b> (کانال‌های پیوی: {pv_cnt}/3)\n"
+        f"• ⚡ دستورات اجراشده سلف دارک: <b>{len(self_cmds):,} دستور</b> | گروه‌های تبچی: <b>{tb_cnt}</b>\n\n"
+        f"🕒 <b>آخرین فعالیت‌های ثبت‌شده در اکانت:</b>\n"
+        f"{recent_block}"
+    )
+    kb = InlineKeyboardMarkup([
+        [p_btn("🔄 بروزرسانی زنده گزارش ۲۴ ساعته", callback_data="self:central_panel", style="success", emoji_key="zap")],
+        [p_btn("⬅️ بازگشت به قابلیت‌های سلف دارک", callback_data="self:features_page:4", style="primary", emoji_key="sparkles")],
+        [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+    ])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+# ====================================================================
+#  ۳. عضویت اجباری پیوی (حداکثر تا ۳ کانال که ربات در آن‌ها ادمین است)
+# ====================================================================
+
+async def pv_force_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+
+    if data.startswith("pvforce:del:"):
+        del_id = int(data.split(":")[2])
+        with closing(get_conn()) as conn, conn:
+            conn.execute("DELETE FROM pv_force_channels WHERE id=? AND user_id=?", (del_id, user.id))
+        await query.answer("🗑 کانال از عضویت اجباری پیوی شما حذف شد.", show_alert=True)
+    elif data == "pvforce:toggle":
+        feats = get_user_features(user.id)
+        feats["f42"] = not feats.get("f42", False)
+        save_user_features(user.id, feats)
+        await query.answer("✅ وضعیت عضویت اجباری پیوی تغییر کرد.")
+    else:
+        await query.answer()
+
+    feats = get_user_features(user.id)
+    is_on = feats.get("f42", False)
+    st_txt = "🟢 فعال و روشن" if is_on else "🔴 غیرفعال"
+
+    with closing(get_conn()) as conn:
+        chs = conn.execute("SELECT * FROM pv_force_channels WHERE user_id=? ORDER BY id ASC", (user.id,)).fetchall()
+
+    ch_list_txt = (
+        "\n".join([f"{i+1}. <b>{html.escape(c['title'])}</b> (<code>{c['channel_id']}</code>)" for i, c in enumerate(chs)])
+        if chs else "⚠️ هنوز هیچ کانالی ثبت نکرده‌اید."
+    )
+
+    text = p_text(
+        f"🛡 <b>مدیریت قابلیت «عضویت اجباری پیوی» (حداکثر ۳ کانال)</b>\n\n"
+        f"⚡ وضعیت فعلی قابلیت: <b>{st_txt}</b>\n"
+        f"📊 کانال‌های ثبت‌شده شما: <b>{len(chs)} از ۳ کانال</b>\n\n"
+        f"📋 <b>لیست کانال‌های عضویت اجباری پیوی شما:</b>\n{ch_list_txt}\n\n"
+        f"📌 <b>نحوه کارکرد:</b>\n"
+        f"وقتی این قابلیت روشن باشد، هر کسی در پیوی به شما پیام بدهد و عضو کانال‌های بالا نباشد، پیامش <b>سریعاً حذف می‌شود</b> و دکمه‌های شیشه‌ای رنگی کانال‌ها به همراه دکمه <b>«✅ بررسی عضویت»</b> برایش ارسال می‌گردد تا ابتدا عضو شود!"
+    )
+
+    rows = [
+        [
+            p_btn(
+                f"وضعیت عضویت اجباری پیوی: {st_txt}",
+                callback_data="pvforce:toggle",
+                style="success" if is_on else "danger",
+                emoji_key="zap"
+            )
+        ]
+    ]
+    if len(chs) < 3:
+        rows.append([p_btn("➕ افزودن کانال جدید (حداکثر ۳ کانال)", callback_data="pvforce:add", style="success", emoji_key="megaphone")])
+    for c in chs:
+        rows.append([p_btn(f"🗑 حذف کانال {c['title']}", callback_data=f"pvforce:del:{c['id']}", style="danger", emoji_key="fire")])
+
+    rows.append([p_btn("⬅️ بازگشت به قابلیت‌های سلف دارک", callback_data="self:features_page:4", style="primary", emoji_key="sparkles")])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+
+async def pv_force_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+
+    with closing(get_conn()) as conn:
+        cnt = conn.execute("SELECT COUNT(*) c FROM pv_force_channels WHERE user_id=?", (user.id,)).fetchone()["c"]
+
+    if cnt >= 3:
+        await query.answer("⚠️ شما حداکثر ۳ کانال مجاز خود را ثبت کرده‌اید! ابتدا یکی را حذف کنید.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_text(
+        p_text(
+            "➕ <b>افزودن کانال به عضویت اجباری پیوی</b>\n\n"
+            "⚠️ <b>نکته مهم:</b> ابتدا این ربات را در کانال مورد نظر خود <b>ادمین (Administrator)</b> کنید.\n"
+            "👇 سپس یوزرنیم کانال با @ (مثلاً <code>@MyChannel</code>) یا لینک `https://t.me/...` یا آیدی عددی کانال را ارسال کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("pvforce:menu")
+    )
+    return PVFORCE_WAIT_CHANNEL
+
+def normalize_channel_identifier(raw_input: str) -> str:
+    s = (raw_input or "").strip()
+    s = re.sub(r"^https?://t\.me/", "@", s)
+    s = re.sub(r"^t\.me/", "@", s)
+    if not s.startswith("@") and not s.startswith("-100") and not s.lstrip("-").isdigit():
+        s = "@" + s
+    return s
+
+async def pv_force_add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ch_identifier = normalize_channel_identifier(update.message.text or "")
+
+    with closing(get_conn()) as conn:
+        cnt = conn.execute("SELECT COUNT(*) c FROM pv_force_channels WHERE user_id=?", (user.id,)).fetchone()["c"]
+    if cnt >= 3:
+        await update.message.reply_text(p_text("⚠️ حداکثر ۳ کانال قابل ثبت است."), parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    try:
+        bot_me = await context.bot.get_me()
+        chat = await context.bot.get_chat(chat_id=ch_identifier)
+        bot_member = await context.bot.get_chat_member(chat_id=chat.id, user_id=bot_me.id)
+        if bot_member.status not in ("administrator", "creator"):
+            await update.message.reply_text(
+                p_text("❌ ربات در این کانال <b>ادمین</b> نیست! لطفاً ابتدا ربات را در کانال ادمین کنید و مجدداً آیدی کانال را بفرستید:"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=cancel_inline_keyboard("pvforce:menu")
+            )
+            return PVFORCE_WAIT_CHANNEL
+
+        ch_title = chat.title or ch_identifier
+        if chat.username:
+            ch_link = f"https://t.me/{chat.username}"
+            ch_id_store = f"@{chat.username}"
+        else:
+            ch_id_store = str(chat.id)
+            ch_link = chat.invite_link or (await context.bot.export_chat_invite_link(chat.id))
+    except Exception as e:
+        await update.message.reply_text(
+            p_text(
+                f"❌ خطا در بررسی کانال! مطمئن شوید ربات در کانال <b>ادمین</b> است و آیدی را صحیح وارد کرده‌اید:\n"
+                f"<code>{html.escape(str(e)[:100])}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("pvforce:menu")
+        )
+        return PVFORCE_WAIT_CHANNEL
+
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO pv_force_channels (user_id, channel_id, channel_link, title) VALUES (?, ?, ?, ?)",
+            (user.id, ch_id_store, ch_link, ch_title)
+        )
+
+    feats = get_user_features(user.id)
+    feats["f42"] = True
+    save_user_features(user.id, feats)
+
+    await update.message.reply_text(
+        p_text(
+            f"✅ <b>کانال «{html.escape(ch_title)}» با موفقیت به عضویت اجباری پیوی شما اضافه شد و قابلیت روشن گردید!</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [p_btn("🛡 بازگشت به مدیریت عضویت اجباری پیوی", callback_data="pvforce:menu", style="primary", emoji_key="zap")]
+        ])
+    )
+    return ConversationHandler.END
+
+async def handle_pv_force_verify(update: Update, context: ContextTypes.DEFAULT_TYPE, user, owner_id: int, is_callback: bool = False):
+    with closing(get_conn()) as conn:
+        pv_chs = conn.execute("SELECT * FROM pv_force_channels WHERE user_id=? LIMIT 3", (owner_id,)).fetchall()
+
+    not_joined = []
+    for pch in pv_chs:
+        try:
+            m = await context.bot.get_chat_member(chat_id=pch["channel_id"], user_id=user.id)
+            if m.status in ("left", "kicked"):
+                not_joined.append(pch)
+        except Exception:
+            not_joined.append(pch)
+
+    if not_joined:
+        rows = [
+            [p_btn(f"📢 عضویت در {c['title']}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
+            for c in not_joined
+        ]
+        rows.append([p_btn("✅ بررسی عضویت", callback_data=f"pvcheck:{owner_id}", style="success", emoji_key="check")])
+        msg_txt = p_text(
+            "⚠️ <b>برای پیام دادن به این کاربر ابتدا باید در کانال‌های زیر عضو شوید و سپس دکمه «✅ بررسی عضویت» را بزنید:</b>"
+        )
+        if is_callback:
+            await update.callback_query.answer("⚠️ هنوز در تمام کانال‌های مشخص‌شده عضو نشده‌اید!", show_alert=True)
+            try:
+                await update.callback_query.edit_message_text(msg_txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(msg_txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+    else:
+        ok_txt = p_text(
+            "✅ <b>عضویت شما در تمام کانال‌ها تایید شد!</b>\n"
+            "🎉 اکنون قفل پیوی برای شما باز است و می‌توانید در پیوی به کاربر پیام دهید."
+        )
+        if is_callback:
+            await update.callback_query.answer("✅ عضویت شما تایید شد! اکنون می‌توانید پیام دهید.", show_alert=True)
+            try:
+                await update.callback_query.edit_message_text(ok_txt, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(ok_txt, parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+
+async def pv_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    owner_id = int(query.data.split(":")[1])
+    await handle_pv_force_verify(update, context, query.from_user, owner_id, is_callback=True)
+
+# ====================================================================
+#  ۴. ساخت قرعه‌کشی هوشمند برای کانال (در بخش قابلیت‌های سلف)
+# ====================================================================
+
+def build_channel_lottery_post_text(lotto_data: dict, status_badge: str = "🟢 در حال برگزاری") -> str:
+    min_p = lotto_data.get("min_participants", 0)
+    max_p = lotto_data.get("max_participants", 0)
+    min_str = f"{min_p} نفر" if min_p > 0 else "بدون حداقل"
+    max_str = f"{max_p} نفر" if max_p > 0 else "بدون محدودیت"
+    desc = lotto_data.get("description", "").strip()
+    desc_block = f"\n📝 <b>توضیحات قرعه‌کشی:</b>\n{html.escape(desc)}\n" if desc else "\n"
+
+    return p_text(
+        f"🎁 <b>قرعه‌کشی بزرگ: {html.escape(lotto_data['title'])}</b>\n"
+        f"{desc_block}\n"
+        f"🏆 تعداد برندگان: <b>{lotto_data['winners_count']} نفر</b> (انتخاب کاملاً تصادفی)\n"
+        f"👥 حداقل شرکت‌کننده: <b>{min_str}</b> | حداکثر ظرفیت: <b>{max_str}</b>\n"
+        f"⏰ زمان پایان قرعه‌کشی: <code>{lotto_data.get('end_time_display', '')}</code>\n"
+        f"📌 وضعیت: <b>{status_badge}</b>\n\n"
+        f"👇 جهت شرکت در قرعه‌کشی روی دکمه شیشه‌ای آبی <b>«🎁 شرکت در قرعه‌کشی»</b> در زیر کلیک کنید:"
+    )
+
+def build_channel_lottery_keyboard(bot_username: str, lotto_id: int, participants_count: int) -> InlineKeyboardMarkup:
+    join_url = f"https://t.me/{bot_username}?start=lotto_{lotto_id}"
+    return InlineKeyboardMarkup([
+        [
+            p_btn(f"👥 تعداد شرکت‌کنندگان: {participants_count} نفر", callback_data=f"lottocnt:{lotto_id}", style="success", emoji_key="check")
+        ],
+        [
+            p_btn("🎁 شرکت در قرعه‌کشی", url=join_url, style="primary", emoji_key="gift")
+        ]
+    ])
+
+async def lotto_create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["lotto_draft"] = {"force_channels": []}
+    await query.edit_message_text(
+        p_text(
+            "🎁 <b>ساخت قرعه‌کشی هوشمند برای کانال (مرحله ۱ از ۸: نام قرعه‌کشی)</b>\n\n"
+            "✨ لطفاً <b>نام قرعه‌کشی</b> را وارد کنید:\n"
+            "<i>(مثال: <code>گیفت تلگرام</code> یا <code>قرعه‌کشی ۵۰۰ الماس</code>)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return LOTTO_WAIT_TITLE
+
+async def lotto_step1_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    title = (update.message.text or "").strip()
+    if not title:
+        await update.message.reply_text(p_text("⚠️ لطفاً نام قرعه‌کشی را وارد کنید:"), parse_mode=ParseMode.HTML)
+        return LOTTO_WAIT_TITLE
+
+    context.user_data.setdefault("lotto_draft", {})["title"] = title
+    kb = InlineKeyboardMarkup([
+        [p_btn("⏭ بدون حداقل شرکت‌کننده", callback_data="lotto:nomin", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            f"👥 <b>مرحله ۲ از ۸: حداقل تعداد شرکت‌کننده</b>\n\n"
+            f"🎁 نام قرعه‌کشی: <b>{html.escape(title)}</b>\n\n"
+            f"👇 لطفاً <b>حداقل تعداد شرکت‌کننده</b> را به صورت عدد وارد کنید (اگر به این تعداد نرسد قرعه‌کشی خودکار لغو می‌شود) یا روی دکمه <b>«بدون حداقل شرکت‌کننده»</b> بزنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LOTTO_WAIT_MIN
+
+async def lotto_step2_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        min_p = 0
+        send_fn = update.callback_query.edit_message_text
+    else:
+        raw_t = normalize_digits((update.message.text or "").strip())
+        if not raw_t.isdigit():
+            await update.message.reply_text(p_text("⚠️ لطفاً یک عدد صحیح وارد کنید یا دکمه «بدون حداقل» را بزنید:"), parse_mode=ParseMode.HTML)
+            return LOTTO_WAIT_MIN
+        min_p = int(raw_t)
+        send_fn = update.message.reply_text
+
+    context.user_data["lotto_draft"]["min_participants"] = min_p
+    kb = InlineKeyboardMarkup([
+        [p_btn("⏭ بدون حداکثر شرکت‌کننده", callback_data="lotto:nomax", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await send_fn(
+        p_text(
+            "👥 <b>مرحله ۳ از ۸: حداکثر تعداد شرکت‌کننده</b>\n\n"
+            "👇 لطفاً <b>حداکثر تعداد شرکت‌کننده</b> را به صورت عدد وارد کنید یا روی دکمه <b>«بدون حداکثر شرکت‌کننده»</b> کلیک کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LOTTO_WAIT_MAX
+
+async def lotto_step3_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        max_p = 0
+        send_fn = update.callback_query.edit_message_text
+    else:
+        raw_t = normalize_digits((update.message.text or "").strip())
+        if not raw_t.isdigit():
+            await update.message.reply_text(p_text("⚠️ لطفاً یک عدد صحیح وارد کنید یا دکمه «بدون حداکثر» را بزنید:"), parse_mode=ParseMode.HTML)
+            return LOTTO_WAIT_MAX
+        max_p = int(raw_t)
+        send_fn = update.message.reply_text
+
+    context.user_data["lotto_draft"]["max_participants"] = max_p
+    context.user_data["lotto_draft"]["force_channels"] = []
+    kb = InlineKeyboardMarkup([
+        [p_btn("⏭ بدون کانال جوین اجباری", callback_data="lotto:fch_done", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await send_fn(
+        p_text(
+            "📢 <b>مرحله ۴ از ۸: کانال‌های جوین اجباری قرعه‌کشی (حداکثر ۱۰ کانال)</b>\n\n"
+            "👇 یوزرنیم کانال‌هایی که کاربران برای شرکت در قرعه‌کشی باید عضو آن‌ها شوند را بفرستید (مثلاً <code>@MyChannel</code>).\n"
+            "• می‌توانید تا <b>۱۰ کانال</b> (یکی‌یکی یا در چند خط زیر هم) ارسال کنید (ربات باید در کانال‌ها ادمین باشد تا عضویت را چک کند).\n"
+            "• یا اگر کانال جوین اجباری ندارید روی دکمه زیر کلیک کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LOTTO_WAIT_FCH
+
+async def lotto_step4_fch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.setdefault("lotto_draft", {})
+    fch_list = draft.setdefault("force_channels", [])
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        kb = InlineKeyboardMarkup([
+            [p_btn("⏭ بدون توضیحات", callback_data="lotto:nodesc", style="success", emoji_key="check")],
+            [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+        ])
+        await update.callback_query.edit_message_text(
+            p_text(
+                f"📝 <b>مرحله ۵ از ۸: توضیحات قرعه‌کشی</b>\n\n"
+                f"📢 کانال‌های جوین اجباری ثبت‌شده: <b>{len(fch_list)} کانال</b>\n\n"
+                f"👇 لطفاً <b>توضیحات قرعه‌کشی</b> را بفرستید یا روی دکمه <b>«بدون توضیحات»</b> کلیک کنید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        return LOTTO_WAIT_DESC
+
+    lines = [x.strip() for x in (update.message.text or "").splitlines() if x.strip()]
+    added_now = []
+    for raw_ch in lines:
+        if len(fch_list) >= 10:
+            break
+        ch_id = normalize_channel_identifier(raw_ch)
+        try:
+            chat = await context.bot.get_chat(ch_id)
+            title = chat.title or ch_id
+            link = f"https://t.me/{chat.username}" if chat.username else (chat.invite_link or await context.bot.export_chat_invite_link(chat.id))
+            cid = f"@{chat.username}" if chat.username else str(chat.id)
+            fch_list.append({"channel_id": cid, "channel_link": link, "title": title})
+            added_now.append(title)
+        except Exception:
+            # حتی اگر خصوصی بود یا لینک مستقیم بود با همان آیدی ذخیره شود
+            link = f"https://t.me/{ch_id.lstrip('@')}"
+            fch_list.append({"channel_id": ch_id, "channel_link": link, "title": ch_id})
+            added_now.append(ch_id)
+
+    kb = InlineKeyboardMarkup([
+        [p_btn(f"✅ اتمام ثبت کانال‌ها ({len(fch_list)}/10) و مرحله بعد", callback_data="lotto:fch_done", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            f"✅ کانال اضافه شد! (تعداد کل کانال‌های ثبت‌شده: <b>{len(fch_list)} از ۱۰ کانال</b>)\n\n"
+            f"👇 اگر کانال دیگری دارید بفرستید، یا روی دکمه سبز <b>«✅ اتمام ثبت کانال‌ها و مرحله بعد»</b> کلیک کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LOTTO_WAIT_FCH
+
+async def lotto_step5_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        desc = ""
+        send_fn = update.callback_query.edit_message_text
+    else:
+        desc = (update.message.text or "").strip()
+        send_fn = update.message.reply_text
+
+    context.user_data["lotto_draft"]["description"] = desc
+    await send_fn(
+        p_text(
+            "⏰ <b>مرحله ۶ از ۸: زمان پایان قرعه‌کشی (به ساعت یا دقیقه)</b>\n\n"
+            "👇 مشخص کنید قرعه‌کشی تا <b>چند ساعت یا چند دقیقه دیگر</b> تمام شود:\n"
+            "• برای دقیقه: مثلاً <code>30 دقیقه</code> یا <code>30m</code> یا فقط عدد <code>30</code>\n"
+            "• برای ساعت: مثلاً <code>2 ساعت</code> یا <code>2h</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return LOTTO_WAIT_DURATION
+
+def parse_duration_to_minutes(raw_text: str) -> int:
+    t = normalize_digits((raw_text or "").strip().lower())
+    m_hr = re.search(r"(\d+)\s*(ساعت|h|hour|hours)", t)
+    m_min = re.search(r"(\d+)\s*(دقیقه|دقيقه|m|min|mins|minute)", t)
+    if m_hr and m_min:
+        return int(m_hr.group(1)) * 60 + int(m_min.group(1))
+    if m_hr:
+        return int(m_hr.group(1)) * 60
+    if m_min:
+        return int(m_min.group(1))
+    if t.isdigit():
+        return int(t)
+    return 0
+
+async def lotto_step6_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mins = parse_duration_to_minutes(update.message.text or "")
+    if mins <= 0:
+        await update.message.reply_text(
+            p_text("⚠️ زمان وارد شده نامعتبر است! لطفاً زمان را به ساعت یا دقیقه وارد کنید (مثلاً <code>30 دقیقه</code> یا <code>2 ساعت</code>):"),
+            parse_mode=ParseMode.HTML
+        )
+        return LOTTO_WAIT_DURATION
+
+    context.user_data["lotto_draft"]["duration_minutes"] = mins
+    await update.message.reply_text(
+        p_text(
+            f"🏆 <b>مرحله ۷ از ۸: تعداد برندگان قرعه‌کشی</b>\n\n"
+            f"⏰ مدت زمان قرعه‌کشی: <b>{mins} دقیقه</b>\n\n"
+            f"👇 لطفاً مشخص کنید این قرعه‌کشی <b>چند برنده</b> داشته باشد؟ (مثلاً <code>1</code> یا <code>3</code> نفر):"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return LOTTO_WAIT_WINNERS
+
+async def lotto_step7_winners(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_w = normalize_digits((update.message.text or "").strip())
+    if not raw_w.isdigit() or int(raw_w) <= 0:
+        await update.message.reply_text(p_text("⚠️ لطفاً تعداد برندگان را به صورت عدد صحیح بزرگ‌تر از صفر وارد کنید (مثلاً <code>1</code>):"), parse_mode=ParseMode.HTML)
+        return LOTTO_WAIT_WINNERS
+
+    context.user_data["lotto_draft"]["winners_count"] = int(raw_w)
+    await update.message.reply_text(
+        p_text(
+            "📢 <b>مرحله ۸ از ۸: کانال مقصد جهت پست شدن قرعه‌کشی</b>\n\n"
+            "⚠️ <i>توجه: ربات باید در کانال مقصد ادمین باشد تا بتواند پست قرعه‌کشی را منتشر و شمارنده شرکت‌کنندگان را بروزرسانی کند.</i>\n\n"
+            "👇 لطفاً <b>لینک یا یوزرنیم کانالی</b> که می‌خواهید قرعه‌کشی در آن پست شود را بفرستید (مثلاً <code>@MyChannel</code> یا <code>https://t.me/MyChannel</code>):"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return LOTTO_WAIT_CHANNEL
+
+async def lotto_step8_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_ch = normalize_channel_identifier(update.message.text or "")
+    draft = context.user_data.get("lotto_draft", {})
+    draft["target_channel"] = target_ch
+
+    mins = draft.get("duration_minutes", 30)
+    kb = InlineKeyboardMarkup([
+        [p_btn("🚀 پست کردن در کانال", callback_data="lotto:publish", style="success", emoji_key="rocket")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+
+    await update.message.reply_text(
+        p_text(
+            f"🎁 <b>پیش‌نمایش نهایی قرعه‌کشی آماده انتشار در کانال</b>\n\n"
+            f"🏷 نام قرعه‌کشی: <b>{html.escape(draft.get('title', ''))}</b>\n"
+            f"👥 حداقل شرکت‌کننده: <b>{draft.get('min_participants', 0) or 'بدون حداقل'}</b>\n"
+            f"👥 حداکثر شرکت‌کننده: <b>{draft.get('max_participants', 0) or 'بدون حداکثر'}</b>\n"
+            f"📢 تعداد کانال‌های جوین اجباری: <b>{len(draft.get('force_channels', []))} کانال</b>\n"
+            f"⏰ مدت زمان: <b>{mins} دقیقه</b>\n"
+            f"🏆 تعداد برندگان: <b>{draft.get('winners_count', 1)} نفر</b>\n"
+            f"🎯 کانال مقصد: <code>{html.escape(target_ch)}</code>\n\n"
+            f"👇 برای انتشار فوری قرعه‌کشی در کانال روی دکمه سبز <b>«🚀 پست کردن در کانال»</b> کلیک کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LOTTO_WAIT_CONFIRM
+
+async def lotto_step9_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    draft = context.user_data.get("lotto_draft")
+    if not draft:
+        await query.answer("⚠️ اطلاعات قرعه‌کشی یافت نشد.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer("🚀 در حال ارسال قرعه‌کشی در کانال...")
+    now_dt = datetime.now()
+    end_dt = now_dt + timedelta(minutes=int(draft["duration_minutes"]))
+    draft["end_time_display"] = end_dt.strftime("%Y-%m-%d %H:%M")
+
+    with closing(get_conn()) as conn, conn:
+        cur = conn.execute(
+            """INSERT INTO channel_lotteries
+               (creator_id, title, min_participants, max_participants, force_channels_json, description,
+                duration_minutes, winners_count, target_channel, status, end_time, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+            (
+                user.id,
+                draft["title"],
+                draft["min_participants"],
+                draft["max_participants"],
+                json.dumps(draft.get("force_channels", []), ensure_ascii=False),
+                draft.get("description", ""),
+                draft["duration_minutes"],
+                draft["winners_count"],
+                draft["target_channel"],
+                end_dt.isoformat(),
+                now_dt.isoformat(),
+            )
+        )
+        lotto_id = cur.lastrowid
+
+    bot_me = await context.bot.get_me()
+    post_text = build_channel_lottery_post_text(draft, status_badge="🟢 در حال برگزاری")
+    post_kb = build_channel_lottery_keyboard(bot_me.username, lotto_id, 0)
+
+    try:
+        sent_msg = await context.bot.send_message(
+            chat_id=draft["target_channel"],
+            text=post_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=post_kb
+        )
+        with closing(get_conn()) as conn, conn:
+            conn.execute("UPDATE channel_lotteries SET channel_message_id=? WHERE id=?", (sent_msg.message_id, lotto_id))
+    except Exception as e:
+        with closing(get_conn()) as conn, conn:
+            conn.execute("DELETE FROM channel_lotteries WHERE id=?", (lotto_id,))
+        await query.edit_message_text(
+            p_text(
+                f"❌ <b>خطا در ارسال پست به کانال <code>{html.escape(draft['target_channel'])}</code>!</b>\n"
+                f"لطفاً مطمئن شوید ربات را در کانال ادمین کرده‌اید و دسترسی ارسال پست دارد.\n"
+                f"جزئیات: <code>{html.escape(str(e)[:120])}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("self:features_page:4")
+        )
+        return ConversationHandler.END
+
+    context.user_data.pop("lotto_draft", None)
+    await query.edit_message_text(
+        p_text(
+            f"🎉 <b>قرعه‌کشی «{html.escape(draft['title'])}» با موفقیت در کانال <code>{html.escape(draft['target_channel'])}</code> پست شد!</b>\n\n"
+            f"🟢 دکمه شیشه‌ای سبز شمارنده شرکت‌کنندگان و دکمه شیشه‌ای آبی شرکت در قرعه‌کشی فعال گردید.\n"
+            f"⏰ در ساعت <code>{draft['end_time_display']}</code> نتایج قرعه‌کشی و آیدی برندگان به صورت کاملاً خودکار در کانال اعلام خواهد شد."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+    return ConversationHandler.END
+
+async def handle_lottery_join_attempt(update: Update, context: ContextTypes.DEFAULT_TYPE, user, lotto_id: int, is_callback: bool = False):
+    with closing(get_conn()) as conn:
+        lotto = conn.execute("SELECT * FROM channel_lotteries WHERE id=?", (lotto_id,)).fetchone()
+        if not lotto:
+            txt = p_text("❌ این قرعه‌کشی یافت نشد.")
+            if is_callback:
+                await update.callback_query.answer("❌ قرعه‌کشی یافت نشد.", show_alert=True)
+            else:
+                await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+            return
+
+        if lotto["status"] != "active":
+            txt = p_text("🏁 مهلت این قرعه‌کشی به پایان رسیده است.")
+            if is_callback:
+                await update.callback_query.answer("🏁 این قرعه‌کشی به پایان رسیده است.", show_alert=True)
+            else:
+                await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+            return
+
+        already = conn.execute(
+            "SELECT 1 FROM lottery_participants WHERE lottery_id=? AND user_id=?",
+            (lotto_id, user.id)
+        ).fetchone()
+        curr_cnt = conn.execute(
+            "SELECT COUNT(*) c FROM lottery_participants WHERE lottery_id=?",
+            (lotto_id,)
+        ).fetchone()["c"]
+
+    if already:
+        msg = "✅ شما قبلاً در این قرعه‌کشی ثبت‌نام کرده‌اید!"
+        if is_callback:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(p_text(msg), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        return
+
+    if lotto["max_participants"] > 0 and curr_cnt >= lotto["max_participants"]:
+        msg = "⚠️ ظرفیت شرکت‌کنندگان این قرعه‌کشی تکمیل شده است!"
+        if is_callback:
+            await update.callback_query.answer(msg, show_alert=True)
+        else:
+            await update.message.reply_text(p_text(msg), parse_mode=ParseMode.HTML)
+        return
+
+    # بررسی عضویت در کانال‌های جوین اجباری قرعه‌کشی
+    try:
+        fch_list = json.loads(lotto["force_channels_json"] or "[]")
+    except Exception:
+        fch_list = []
+
+    not_joined = []
+    for ch in fch_list:
+        try:
+            m = await context.bot.get_chat_member(chat_id=ch["channel_id"], user_id=user.id)
+            if m.status in ("left", "kicked"):
+                not_joined.append(ch)
+        except Exception:
+            pass
+
+    if not_joined:
+        rows = [
+            [p_btn(f"📢 عضویت در {c.get('title', c['channel_id'])}", url=c["channel_link"], style="primary", emoji_key="megaphone")]
+            for c in not_joined
+        ]
+        rows.append([
+            p_btn("🎁 عضو شدم و شرکت در قرعه‌کشی", callback_data=f"lottocheck:{lotto_id}", style="success", emoji_key="check")
+        ])
+        join_prompt = p_text(
+            f"🎁 <b>شرکت در قرعه‌کشی «{html.escape(lotto['title'])}»</b>\n\n"
+            f"⚠️ برای شرکت در این قرعه‌کشی، ابتدا باید در کانال‌های زیر عضو شوید و سپس روی دکمه سبز <b>«🎁 عضو شدم و شرکت در قرعه‌کشی»</b> کلیک کنید:"
+        )
+        if is_callback:
+            await update.callback_query.answer("⚠️ هنوز در تمام کانال‌های قرعه‌کشی عضو نشده‌اید!", show_alert=True)
+            try:
+                await update.callback_query.edit_message_text(join_prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(join_prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    # ثبت قطعی کاربر در قرعه‌کشی و افزایش خودکار شمارنده روی دکمه شیشه‌ای سبز در کانال
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO lottery_participants (lottery_id, user_id, username, first_name, joined_at) VALUES (?, ?, ?, ?, ?)",
+            (lotto_id, user.id, user.username or "", user.first_name or "کاربر", datetime.now().isoformat())
+        )
+        new_cnt = conn.execute(
+            "SELECT COUNT(*) c FROM lottery_participants WHERE lottery_id=?",
+            (lotto_id,)
+        ).fetchone()["c"]
+
+    # آپدیت لحظه‌ای دکمه شیشه‌ای سبز رنگ در کانال
+    try:
+        bot_me = await context.bot.get_me()
+        if lotto["channel_message_id"]:
+            await context.bot.edit_message_reply_markup(
+                chat_id=lotto["target_channel"],
+                message_id=lotto["channel_message_id"],
+                reply_markup=build_channel_lottery_keyboard(bot_me.username, lotto_id, new_cnt)
+            )
+    except Exception as e:
+        logger.debug(f"Update lottery channel button count error: {e}")
+
+    ok_text = p_text(
+        f"🎉 <b>تبریک! نام شما با موفقیت در قرعه‌کشی «{html.escape(lotto['title'])}» ثبت شد!</b>\n\n"
+        f"👥 شماره شرکت‌کننده شما: <b>نفر {new_cnt}</b>\n"
+        f"⏰ نتایج قرعه‌کشی پس از اتمام زمان به صورت خودکار در کانال اعلام خواهد شد."
+    )
+    if is_callback:
+        await update.callback_query.answer("🎉 ثبت‌نام شما در قرعه‌کشی انجام شد!", show_alert=True)
+        try:
+            await update.callback_query.edit_message_text(ok_text, parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(ok_text, parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+
+async def lottery_callbacks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    if data.startswith("lottocnt:"):
+        lid = int(data.split(":")[1])
+        with closing(get_conn()) as conn:
+            cnt = conn.execute("SELECT COUNT(*) c FROM lottery_participants WHERE lottery_id=?", (lid,)).fetchone()["c"]
+        await query.answer(f"👥 تعداد شرکت‌کنندگان تا این لحظه: {cnt} نفر", show_alert=True)
+    elif data.startswith("lottocheck:"):
+        lid = int(data.split(":")[1])
+        await handle_lottery_join_attempt(update, context, query.from_user, lid, is_callback=True)
+
+async def lottery_expiration_job(context: ContextTypes.DEFAULT_TYPE):
+    """بررسی خودکار زمان پایان قرعه‌کشی‌ها و اعلام تصادفی برندگان در کانال"""
+    now_iso = datetime.now().isoformat()
+    with closing(get_conn()) as conn:
+        expired_lottos = conn.execute(
+            "SELECT * FROM channel_lotteries WHERE status='active' AND end_time <= ?",
+            (now_iso,)
+        ).fetchall()
+
+    bot = context.bot if hasattr(context, "bot") else (BOT_APP_REF.bot if BOT_APP_REF else None)
+    if not bot:
+        return
+
+    for lotto in expired_lottos:
+        lid = lotto["id"]
+        with closing(get_conn()) as conn, conn:
+            participants = conn.execute(
+                "SELECT * FROM lottery_participants WHERE lottery_id=?",
+                (lid,)
+            ).fetchall()
+            total_p = len(participants)
+
+            if lotto["min_participants"] > 0 and total_p < lotto["min_participants"]:
+                conn.execute("UPDATE channel_lotteries SET status='canceled' WHERE id=?", (lid,))
+                cancel_kb = InlineKeyboardMarkup([
+                    [p_btn(f"❌ قرعه‌کشی لغو شد ({total_p}/{lotto['min_participants']} نفر)", callback_data="noop", style="danger", emoji_key="fire")]
+                ])
+                try:
+                    if lotto["channel_message_id"]:
+                        await bot.edit_message_reply_markup(
+                            chat_id=lotto["target_channel"],
+                            message_id=lotto["channel_message_id"],
+                            reply_markup=cancel_kb
+                        )
+                    await bot.send_message(
+                        chat_id=lotto["target_channel"],
+                        reply_to_message_id=lotto["channel_message_id"],
+                        text=p_text(
+                            f"❌ <b>قرعه‌کشی «{html.escape(lotto['title'])}» لغو شد!</b>\n\n"
+                            f"به دلیل نرسیدن تعداد شرکت‌کنندگان (<b>{total_p} نفر</b>) به حدنصاب تعیین‌شده (<b>حداقل {lotto['min_participants']} نفر</b>)، این قرعه‌کشی لغو گردید."
+                        ),
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                continue
+
+            conn.execute("UPDATE channel_lotteries SET status='finished' WHERE id=?", (lid,))
+
+        if total_p == 0:
+            done_kb = InlineKeyboardMarkup([
+                [p_btn("🏁 پایان قرعه‌کشی (بدون شرکت‌کننده)", callback_data="noop", style="danger", emoji_key="fire")]
+            ])
+            try:
+                if lotto["channel_message_id"]:
+                    await bot.edit_message_reply_markup(
+                        chat_id=lotto["target_channel"],
+                        message_id=lotto["channel_message_id"],
+                        reply_markup=done_kb
+                    )
+            except Exception:
+                pass
+            continue
+
+        win_count = min(int(lotto["winners_count"]), total_p)
+        winners = random.sample(list(participants), win_count)
+
+        winner_lines = []
+        for idx, w in enumerate(winners, 1):
+            w_name = html.escape(w["first_name"] or "کاربر")
+            w_user = f"(@{w['username']})" if w["username"] else ""
+            winner_lines.append(
+                f"🏆 <b>برنده شماره {idx}:</b> <a href=\"tg://user?id={w['user_id']}\">{w_name}</a> {w_user} | آیدی عددی: <code>{w['user_id']}</code>"
+            )
+
+        done_kb = InlineKeyboardMarkup([
+            [p_btn(f"🏁 قرعه‌کشی انجام شد ({total_p} شرکت‌کننده)", callback_data=f"lottocnt:{lid}", style="success", emoji_key="crown")]
+        ])
+        try:
+            if lotto["channel_message_id"]:
+                await bot.edit_message_reply_markup(
+                    chat_id=lotto["target_channel"],
+                    message_id=lotto["channel_message_id"],
+                    reply_markup=done_kb
+                )
+            await bot.send_message(
+                chat_id=lotto["target_channel"],
+                reply_to_message_id=lotto["channel_message_id"],
+                text=p_text(
+                    f"🎉 <b>نتایج نهایی قرعه‌کشی «{html.escape(lotto['title'])}» اعلام شد!</b>\n\n"
+                    f"👥 کل شرکت‌کنندگان: <b>{total_p} نفر</b>\n"
+                    f"👑 <b>لیست برندگان خوش‌شانس (انتخاب کاملاً تصادفی):</b>\n\n"
+                    + "\n".join(winner_lines)
+                ),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.debug(f"Lottery result post error: {e}")
+
+# ====================================================================
+#  ۵. ساخت دکمه شیشه‌ای رنگی برای کانال (در بخش قابلیت‌های سلف)
+# ====================================================================
+
+async def chbtn_create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["chbtn_draft"] = {}
+    await query.edit_message_text(
+        p_text(
+            "✨ <b>ساخت دکمه شیشه‌ای رنگی برای کانال (مرحله ۱ از ۵: ارسال محتوا)</b>\n\n"
+            "👇 لطفاً ابتدا <b>توضیحات یا پست خود را با عکس، ویدیو، گیف، فایل یا متن</b> (هر چیزی که می‌خواهید در کانال پست شود) ارسال کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return CHBTN_WAIT_CONTENT
+
+async def chbtn_step1_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    draft = context.user_data.setdefault("chbtn_draft", {})
+    draft["source_chat_id"] = msg.chat_id
+    draft["source_message_id"] = msg.message_id
+    draft["has_media"] = bool(msg.photo or msg.video or msg.document or msg.animation or msg.audio or msg.voice)
+    draft["text_content"] = msg.text or msg.caption or ""
+
+    await msg.reply_text(
+        p_text(
+            "🔗 <b>مرحله ۲ از ۵: لینک دکمه شیشه‌ای</b>\n\n"
+            "👇 حالا <b>لینکی که می‌خواهید داخل دکمه شیشه‌ای باشد</b> را بفرستید:\n"
+            "<i>(مثال: <code>https://t.me/YourChannel</code> یا آدرس سایت)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return CHBTN_WAIT_LINK
+
+async def chbtn_step2_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = (update.message.text or "").strip()
+    if link.startswith("@"):
+        link = f"https://t.me/{link.lstrip('@')}"
+    elif link.startswith("t.me/"):
+        link = f"https://{link}"
+    elif not link.startswith("http://") and not link.startswith("https://") and not link.startswith("tg://"):
+        link = f"https://{link}"
+
+    context.user_data["chbtn_draft"]["btn_url"] = link
+    await update.message.reply_text(
+        p_text(
+            "🏷 <b>مرحله ۳ از ۵: نام روی دکمه شیشه‌ای</b>\n\n"
+            "👇 حالا <b>اسم دکمه شیشه‌ای</b> که می‌خواهید روی آن نمایش داده شود را بفرستید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return CHBTN_WAIT_NAME
+
+async def chbtn_step3_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    btn_name = (update.message.text or "").strip()
+    if not btn_name:
+        await update.message.reply_text(p_text("⚠️ لطفاً نام دکمه شیشه‌ای را وارد کنید:"), parse_mode=ParseMode.HTML)
+        return CHBTN_WAIT_NAME
+
+    context.user_data["chbtn_draft"]["btn_name"] = btn_name
+    kb = InlineKeyboardMarkup([
+        [
+            p_btn("🔵 آبی (Primary)", callback_data="chbtn_color:primary", style="primary", emoji_key="gem"),
+            p_btn("🟢 سبز (Success)", callback_data="chbtn_color:success", style="success", emoji_key="check"),
+        ],
+        [
+            p_btn("🔴 قرمز (Danger)", callback_data="chbtn_color:danger", style="danger", emoji_key="fire"),
+            InlineKeyboardButton("⚪ رنگ معمولی شیشه‌ای", callback_data="chbtn_color:normal"),
+        ],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            "🎨 <b>مرحله ۴ از ۵: انتخاب رنگ دکمه شیشه‌ای</b>\n\n"
+            "👇 لطفاً رنگ دکمه شیشه‌ای مورد نظر خود را از بین گزینه‌های <b>آبی، سبز، قرمز یا معمولی</b> انتخاب کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return CHBTN_WAIT_COLOR
+
+async def chbtn_step4_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    color_style = query.data.split(":")[1]
+    context.user_data["chbtn_draft"]["btn_style"] = color_style
+
+    await query.edit_message_text(
+        p_text(
+            "📢 <b>مرحله ۵ از ۵: لینک یا آیدی کانال مقصد</b>\n\n"
+            "⚠️ <i>توجه: ربات باید در کانال مقصد ادمین باشد.</i>\n"
+            "👇 لطفاً <b>لینک یا آیدی کانالی</b> که می‌خواهید پست داخلش ارسال شود را بفرستید (مثلاً <code>@MyChannel</code> یا <code>https://t.me/MyChannel</code>):"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return CHBTN_WAIT_CHANNEL
+
+async def chbtn_step5_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_ch = normalize_channel_identifier(update.message.text or "")
+    draft = context.user_data.get("chbtn_draft", {})
+    draft["target_channel"] = target_ch
+
+    color_names = {
+        "primary": "🔵 آبی",
+        "success": "🟢 سبز",
+        "danger": "🔴 قرمز",
+        "normal": "⚪ معمولی شیشه‌ای",
+    }
+    kb = InlineKeyboardMarkup([
+        [p_btn("🚀 پست کردن در کانال", callback_data="chbtn:publish", style="success", emoji_key="rocket")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            f"✨ <b>آماده انتشار پست با دکمه شیشه‌ای در کانال</b>\n\n"
+            f"🏷 عنوان دکمه: <b>{html.escape(draft.get('btn_name', ''))}</b>\n"
+            f"🔗 لینک دکمه: <code>{html.escape(draft.get('btn_url', ''))}</code>\n"
+            f"🎨 رنگ دکمه: <b>{color_names.get(draft.get('btn_style', 'primary'), 'آبی')}</b>\n"
+            f"📢 کانال مقصد: <code>{html.escape(target_ch)}</code>\n\n"
+            f"👇 برای انتشار در کانال روی دکمه سبز <b>«🚀 پست کردن در کانال»</b> بزنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return CHBTN_WAIT_CONFIRM
+
+async def chbtn_step6_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    draft = context.user_data.get("chbtn_draft")
+    if not draft:
+        await query.answer("⚠️ اطلاعات پست یافت نشد.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer("🚀 در حال ارسال پست به کانال...")
+    style_choice = draft.get("btn_style", "primary")
+    if style_choice == "normal":
+        glass_btn = InlineKeyboardButton(draft["btn_name"], url=draft["btn_url"])
+    else:
+        glass_btn = p_btn(draft["btn_name"], url=draft["btn_url"], style=style_choice, emoji_key="sparkles")
+
+    post_markup = InlineKeyboardMarkup([[glass_btn]])
+
+    try:
+        await context.bot.copy_message(
+            chat_id=draft["target_channel"],
+            from_chat_id=draft["source_chat_id"],
+            message_id=draft["source_message_id"],
+            reply_markup=post_markup
+        )
+    except Exception as e:
+        await query.edit_message_text(
+            p_text(
+                f"❌ <b>خطا در ارسال پست به کانال <code>{html.escape(draft['target_channel'])}</code>!</b>\n"
+                f"لطفاً مطمئن شوید ربات در کانال ادمین است و لینک دکمه معتبر است.\n"
+                f"جزئیات: <code>{html.escape(str(e)[:120])}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("self:features_page:4")
+        )
+        return ConversationHandler.END
+
+    context.user_data.pop("chbtn_draft", None)
+    await query.edit_message_text(
+        p_text(
+            f"✅ <b>پست شما با دکمه شیشه‌ای رنگی با موفقیت در کانال <code>{html.escape(draft['target_channel'])}</code> منتشر شد!</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+    return ConversationHandler.END
+
+# ====================================================================
+#  ۶. قابلیت‌های گروهی ربات: «موجودی»، «بازی [مبلغ]» و ریپلای «انتقال [مبلغ]»
+# ====================================================================
+
+async def group_commands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش دستورات گروهی: ۱. موجودی | ۲. بازی [مبلغ] | ۳. ریپلای انتقال [مبلغ] با کارمزد ۱۰٪"""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or chat.type not in ("group", "supergroup"):
+        return
+
+    raw_txt = (msg.text or "").strip()
+    if not raw_txt:
+        return
+
+    norm_txt = normalize_digits(raw_txt)
+
+    # ۱. دستور «موجودی» در گروه -> نمایش موجودی داخل دکمه شیشه‌ای آبی رنگ
+    if norm_txt == "موجودی":
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
+        kb = InlineKeyboardMarkup([
+            [
+                p_btn(
+                    f"💎 موجودی {user.first_name[:22]}: {db_user['diamonds']:,} الماس",
+                    callback_data=f"grpbal:{user.id}",
+                    style="primary",
+                    emoji_key="gem"
+                )
+            ]
+        ])
+        await msg.reply_text(
+            p_text(f"👤 کاربر <b>{html.escape(user.first_name)}</b>، موجودی الماس شما در دکمه شیشه‌ای آبی زیر نمایش داده شده است:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        return
+
+    # ۲. دستور «بازی [مبلغ]» در گروه (مثال: بازی 60) -> حداقل شرط ۱۵ الماس و جایزه ۲ برابر
+    m_game = re.match(r"^بازی\s+(\d+)$", norm_txt)
+    if m_game:
+        bet = int(m_game.group(1))
+        if bet < 15:
+            await msg.reply_text(
+                p_text("⚠️ <b>حداقل مبلغ شرط برای ساخت بازی ۱۵ الماس است!</b>\n<i>(مثال: <code>بازی 60</code>)</i>"),
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
+        if db_user["diamonds"] < bet:
+            await msg.reply_text(
+                p_text(
+                    f"❌ <b>موجودی شما برای ساخت این بازی کافی نیست!</b>\n"
+                    f"💎 مبلغ شرط بازی: <b>{bet:,} الماس</b> | موجودی فعلی شما: <b>{db_user['diamonds']:,} الماس</b>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        with closing(get_conn()) as conn, conn:
+            cur = conn.execute(
+                """INSERT INTO group_games (chat_id, creator_id, creator_name, bet_amount, status, created_at)
+                   VALUES (?, ?, ?, ?, 'waiting', ?)""",
+                (chat.id, user.id, user.first_name or "کاربر", bet, datetime.now().isoformat())
+            )
+            game_id = cur.lastrowid
+
+        prize = bet * 2
+        kb = InlineKeyboardMarkup([
+            [
+                p_btn(
+                    f"🎲 شرکت در بازی (شرط: {bet:,} الماس | جایزه: {prize:,} الماس)",
+                    callback_data=f"grpgame:join:{game_id}",
+                    style="success",
+                    emoji_key="party"
+                )
+            ],
+            [
+                p_btn(f"👤 بازیکن اول: {user.first_name[:18]}", callback_data="noop", style="primary", emoji_key="star"),
+                p_btn("❌ لغو بازی", callback_data=f"grpgame:cancel:{game_id}", style="danger", emoji_key="fire"),
+            ]
+        ])
+        await msg.reply_text(
+            p_text(
+                f"🎮 <b>چالش بازی دو نفره الماس در گروه ساخته شد!</b>\n\n"
+                f"👤 سازنده بازی: <b>{html.escape(user.first_name)}</b>\n"
+                f"💎 مبلغ شرط هر نفر: <b>{bet:,} الماس</b>\n"
+                f"🏆 جایزه برنده نهایی (۲ برابر شرط): <b>{prize:,} الماس</b>\n"
+                f"👥 ظرفیت: <b>فقط سازنده و ۱ نفر دیگر (۱/۲)</b>\n\n"
+                f"👇 نفر دوم برای شروع بازی و انتخاب تصادفی برنده روی دکمه شیشه‌ای سبز زیر کلیک کند:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+        return
+
+    # ۳. دستور ریپلای «انتقال [مبلغ]» در گروه (مثال: انتقال 50) -> کسر ۱۰٪ کارمزد و ارسال نوتیف در ربات
+    m_tr = re.match(r"^انتقال\s+(\d+)$", norm_txt)
+    if m_tr and msg.reply_to_message and msg.reply_to_message.from_user:
+        if get_setting("transfer_enabled", "1") == "0" and not is_admin(user.id):
+            await msg.reply_text(p_text("⛔ بخش انتقال الماس در حال حاضر توسط مدیریت غیرفعال شده است."), parse_mode=ParseMode.HTML)
+            return
+
+        target_user = msg.reply_to_message.from_user
+        if target_user.is_bot:
+            await msg.reply_text(p_text("⚠️ امکان انتقال الماس به ربات‌ها وجود ندارد!"), parse_mode=ParseMode.HTML)
+            return
+        if target_user.id == user.id:
+            await msg.reply_text(p_text("⚠️ شما نمی‌توانید به خودتان الماس انتقال دهید!"), parse_mode=ParseMode.HTML)
+            return
+
+        amount = int(m_tr.group(1))
+        min_tr = int(get_setting("min_transfer_diamonds", "50"))
+        if amount < min_tr:
+            await msg.reply_text(
+                p_text(f"⚠️ حداقل تعداد مجاز برای انتقال <b>{min_tr} الماس</b> است! (مثال: <code>انتقال {min_tr}</code>)"),
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        fee, total_deduct = calc_transfer_fee(amount)
+        sender_db = get_or_create_user(user.id, user.username, user.first_name)
+        if sender_db["diamonds"] < total_deduct:
+            await msg.reply_text(
+                p_text(
+                    f"❌ <b>موجودی شما با احتساب ۱۰٪ کارمزد کافی نیست!</b>\n"
+                    f"💎 مبلغ انتقال: <b>{amount:,} الماس</b> | 💸 کارمزد (۱۰٪): <b>{fee:,} الماس</b>\n"
+                    f"🔢 مجموع مورد نیاز: <b>{total_deduct:,} الماس</b> | 💰 موجودی شما: <b>{sender_db['diamonds']:,} الماس</b>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        get_or_create_user(target_user.id, target_user.username, target_user.first_name)
+        add_user_diamonds(user.id, -total_deduct)
+        add_user_diamonds(target_user.id, amount)
+
+        new_sender = get_or_create_user(user.id)
+        new_receiver = get_or_create_user(target_user.id)
+
+        kb = InlineKeyboardMarkup([
+            [
+                p_btn(f"💎 انتقال موفق: {amount:,} الماس (کارمزد ۱۰٪: {fee:,})", callback_data="noop", style="success", emoji_key="check")
+            ]
+        ])
+        await msg.reply_text(
+            p_text(
+                f"✅ <b>انتقال الماس در گروه با موفقیت انجام شد!</b>\n\n"
+                f"📤 فرستنده: <b>{html.escape(user.first_name)}</b> (<code>{user.id}</code>)\n"
+                f"📥 گیرنده: <b>{html.escape(target_user.first_name)}</b> (<code>{target_user.id}</code>)\n"
+                f"💎 مبلغ واریزشده به گیرنده: <b>{amount:,} الماس</b>\n"
+                f"💸 کارمزد انتقال (۱۰٪): <b>{fee:,} الماس</b> (مجموع کسر شده: <b>{total_deduct:,} الماس</b>)"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+
+        # ارسال نوتیفیکیشن داخل پیوی ربات برای کاربر گیرنده
+        try:
+            await context.bot.send_message(
+                chat_id=target_user.id,
+                text=p_text(
+                    f"🎁 <b>نوتیفیکیشن دریافت الماس از گروه!</b>\n\n"
+                    f"👤 کاربر <b>{html.escape(user.first_name)}</b> (<code>{user.id}</code>) در گروه <b>{html.escape(chat.title or 'گروه')}</b> با ریپلای روی پیام شما تعداد <b>{amount:,} الماس</b> به حساب شما منتقل کرد!\n"
+                    f"💎 موجودی جدید شما در ربات: <b>{new_receiver['diamonds']:,} الماس</b>"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(target_user.id)
+            )
+        except Exception:
+            pass
+
+async def group_callbacks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+
+    if data.startswith("grpbal:"):
+        owner_uid = int(data.split(":")[1])
+        u_row = get_or_create_user(owner_uid)
+        await query.answer(f"💎 موجودی الماس: {u_row['diamonds']:,} الماس", show_alert=True)
+        return
+
+    if data.startswith("grpgame:"):
+        _, action, gid_str = data.split(":")
+        gid = int(gid_str)
+
+        with closing(get_conn()) as conn, conn:
+            game = conn.execute("SELECT * FROM group_games WHERE id=?", (gid,)).fetchone()
+            if not game:
+                await query.answer("❌ بازی یافت نشد.", show_alert=True)
+                return
+
+            if game["status"] != "waiting":
+                await query.answer("🏁 این بازی قبلاً به پایان رسیده یا لغو شده است.", show_alert=True)
+                return
+
+            if action == "cancel":
+                if user.id != game["creator_id"] and not is_admin(user.id):
+                    await query.answer("⛔ فقط سازنده بازی می‌تواند قبل از شروع آن را لغو کند!", show_alert=True)
+                    return
+                conn.execute("UPDATE group_games SET status='canceled' WHERE id=?", (gid,))
+                await query.answer("🗑 بازی لغو شد.")
+                await query.edit_message_text(
+                    p_text(f"🗑 بازی شرطی <b>{game['bet_amount']:,} الماسی</b> توسط سازنده لغو گردید."),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+
+            if action == "join":
+                if user.id == game["creator_id"]:
+                    await query.answer("⚠️ شما سازنده این بازی هستید! منتظر بمانید یک نفر دیگر شرکت کند.", show_alert=True)
+                    return
+
+                bet = int(game["bet_amount"])
+                creator_db = get_or_create_user(game["creator_id"])
+                opponent_db = get_or_create_user(user.id, user.username, user.first_name)
+
+                if creator_db["diamonds"] < bet:
+                    conn.execute("UPDATE group_games SET status='canceled' WHERE id=?", (gid,))
+                    await query.answer("❌ موجودی سازنده بازی دیگر کافی نیست و بازی لغو شد!", show_alert=True)
+                    await query.edit_message_text(p_text("❌ بازی به دلیل عدم موجودی کافی سازنده لغو شد."), parse_mode=ParseMode.HTML)
+                    return
+
+                if opponent_db["diamonds"] < bet:
+                    await query.answer(f"⚠️ موجودی شما ({opponent_db['diamonds']} الماس) برای شرکت در این بازی ({bet} الماس) کافی نیست!", show_alert=True)
+                    return
+
+                # کسر مبلغ شرط از هر دو بازیکن و انتخاب کاملاً تصادفی برنده با جایزه ۲ برابر مبلغ شرط
+                prize = bet * 2
+                winner_id = secrets.choice([game["creator_id"], user.id])
+                winner_name = game["creator_name"] if winner_id == game["creator_id"] else (user.first_name or "کاربر")
+                loser_name = (user.first_name or "کاربر") if winner_id == game["creator_id"] else game["creator_name"]
+
+                conn.execute("UPDATE users SET diamonds = diamonds - ? WHERE user_id=?", (bet, game["creator_id"]))
+                conn.execute("UPDATE users SET diamonds = diamonds - ? WHERE user_id=?", (bet, user.id))
+                conn.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (prize, winner_id))
+                conn.execute(
+                    "UPDATE group_games SET status='finished', opponent_id=?, opponent_name=?, winner_id=? WHERE id=?",
+                    (user.id, user.first_name or "کاربر", winner_id, gid)
+                )
+
+        await query.answer(f"🎉 برنده مشخص شد: {winner_name}!", show_alert=True)
+        res_kb = InlineKeyboardMarkup([
+            [
+                p_btn(f"🏆 برنده: {winner_name[:20]} (+{prize:,} الماس)", callback_data=f"grpbal:{winner_id}", style="success", emoji_key="crown")
+            ],
+            [
+                p_btn(f"🎮 بازیکن ۱: {game['creator_name'][:15]}", callback_data=f"grpbal:{game['creator_id']}", style="primary"),
+                p_btn(f"🎮 بازیکن ۲: {(user.first_name or 'کاربر')[:15]}", callback_data=f"grpbal:{user.id}", style="primary"),
+            ]
+        ])
+        await query.edit_message_text(
+            p_text(
+                f"🎉 <b>نتیجه بازی دو نفره الماس مشخص شد!</b>\n\n"
+                f"👤 بازیکن اول: <b>{html.escape(game['creator_name'])}</b>\n"
+                f"👤 بازیکن دوم: <b>{html.escape(user.first_name or 'کاربر')}</b>\n"
+                f"💎 مبلغ شرط هر نفر: <b>{bet:,} الماس</b>\n\n"
+                f"👑 <b>برنده خوش‌شانس (انتخاب تصادفی):</b> <b>{html.escape(winner_name)}</b> (<code>{winner_id}</code>)\n"
+                f"💰 <b>جایزه دریافتی (۲ برابر شرط):</b> <b>{prize:,} الماس</b>\n"
+                f"💔 بازنده: <b>{html.escape(loser_name)}</b>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=res_kb
+        )
+
+# ====================================================================
 #  بازیابی خودکار سلف‌های روشن هنگام بالا آمدن سرور Render
 # ====================================================================
 
@@ -3622,14 +5485,19 @@ async def post_init_startup(application: Application):
     if application.job_queue:
         application.job_queue.run_repeating(hourly_diamond_billing_job, interval=60, first=30)
         application.job_queue.run_repeating(profile_and_tabchi_worker_job, interval=60, first=20)
+        application.job_queue.run_repeating(lottery_expiration_job, interval=15, first=10)
     else:
         # در صورتی که job_queue نصب نبود، با تسک asyncio اجرا شود
         async def fallback_loop():
+            tick = 0
             while True:
-                await asyncio.sleep(60)
+                await asyncio.sleep(15)
+                tick += 15
                 try:
-                    await hourly_diamond_billing_job(application)
-                    await profile_and_tabchi_worker_job(application)
+                    await lottery_expiration_job(application)
+                    if tick % 60 == 0:
+                        await hourly_diamond_billing_job(application)
+                        await profile_and_tabchi_worker_job(application)
                 except Exception as e:
                     logger.warning(f"Loop error: {e}")
         asyncio.create_task(fallback_loop())
@@ -3740,7 +5608,7 @@ def main():
         allow_reentry=True,
     )
 
-    # ۵.۵ مکالمه انتقال الماس بین کاربران با آیدی عددی
+    # ۵.۵ مکالمه انتقال الماس بین کاربران با آیدی عددی (با کارمزد ۱۰٪)
     transfer_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(transfer_diamonds_start, pattern="^menu:transfer_diamonds$")],
         states={
@@ -3754,7 +5622,102 @@ def main():
         allow_reentry=True,
     )
 
-    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ، الماس همگانی با متن دلخواه و ساخت کد هدیه مرحله‌ای)
+    # ۶. مکالمه ثبت تیکت پشتیبانی توسط کاربر
+    ticket_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(support_ticket_start, pattern="^support:new_ticket$")],
+        states={
+            TICKET_WAIT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_ticket_receive)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۶.۵ مکالمه پاسخ ادمین به تیکت کاربران
+    ticket_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_ticket_reply_start, pattern="^ticket_reply:")],
+        states={
+            ADM_WAIT_TICKET_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_ticket_reply_send)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۷. مکالمه افزودن کانال به عضویت اجباری پیوی (حداکثر ۳ کانال)
+    pvforce_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(pv_force_add_start, pattern="^pvforce:add$")],
+        states={
+            PVFORCE_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, pv_force_add_receive)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(pv_force_menu_callback, pattern="^pvforce:menu$"),
+            CallbackQueryHandler(self_features_callbacks, pattern="^self:features_page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۸. مکالمه ساخت قرعه‌کشی هوشمند برای کانال
+    lotto_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lotto_create_start, pattern="^lotto:start$")],
+        states={
+            LOTTO_WAIT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step1_title)],
+            LOTTO_WAIT_MIN: [
+                CallbackQueryHandler(lotto_step2_min, pattern="^lotto:nomin$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step2_min),
+            ],
+            LOTTO_WAIT_MAX: [
+                CallbackQueryHandler(lotto_step3_max, pattern="^lotto:nomax$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step3_max),
+            ],
+            LOTTO_WAIT_FCH: [
+                CallbackQueryHandler(lotto_step4_fch, pattern="^lotto:fch_done$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step4_fch),
+            ],
+            LOTTO_WAIT_DESC: [
+                CallbackQueryHandler(lotto_step5_desc, pattern="^lotto:nodesc$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step5_desc),
+            ],
+            LOTTO_WAIT_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step6_duration)],
+            LOTTO_WAIT_WINNERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step7_winners)],
+            LOTTO_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, lotto_step8_channel)],
+            LOTTO_WAIT_CONFIRM: [CallbackQueryHandler(lotto_step9_publish, pattern="^lotto:publish$")],
+        },
+        fallbacks=[
+            CallbackQueryHandler(self_features_callbacks, pattern="^self:features_page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۹. مکالمه ساخت دکمه شیشه‌ای رنگی برای کانال
+    chbtn_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(chbtn_create_start, pattern="^chbtn:start$")],
+        states={
+            CHBTN_WAIT_CONTENT: [MessageHandler(filters.ALL & ~filters.COMMAND, chbtn_step1_content)],
+            CHBTN_WAIT_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, chbtn_step2_link)],
+            CHBTN_WAIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, chbtn_step3_name)],
+            CHBTN_WAIT_COLOR: [CallbackQueryHandler(chbtn_step4_color, pattern="^chbtn_color:")],
+            CHBTN_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, chbtn_step5_channel)],
+            CHBTN_WAIT_CONFIRM: [CallbackQueryHandler(chbtn_step6_publish, pattern="^chbtn:publish$")],
+        },
+        fallbacks=[
+            CallbackQueryHandler(self_features_callbacks, pattern="^self:features_page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۱۰. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ، الماس همگانی با متن دلخواه و ساخت کد هدیه مرحله‌ای)
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_router_callback, pattern="^adm:")],
         states={
@@ -3785,12 +5748,22 @@ def main():
     app.add_handler(buy_ton_conv)
     app.add_handler(gift_conv)
     app.add_handler(transfer_conv)
+    app.add_handler(ticket_conv)
+    app.add_handler(ticket_reply_conv)
+    app.add_handler(pvforce_conv)
+    app.add_handler(lotto_conv)
+    app.add_handler(chbtn_conv)
     app.add_handler(admin_conv)
     app.add_handler(CommandHandler("start", start_cmd))
 
     app.add_handler(CallbackQueryHandler(activate_self_code_keypad_callback, pattern="^codepad:"))
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(stop_self_now_callback, pattern="^self:stop_now$"))
+    app.add_handler(CallbackQueryHandler(central_panel_24h_callback, pattern="^self:central_panel$"))
+    app.add_handler(CallbackQueryHandler(pv_force_menu_callback, pattern="^pvforce:(menu|toggle|del:)"))
+    app.add_handler(CallbackQueryHandler(pv_check_callback, pattern="^pvcheck:"))
+    app.add_handler(CallbackQueryHandler(lottery_callbacks_handler, pattern="^(lottocnt:|lottocheck:)"))
+    app.add_handler(CallbackQueryHandler(group_callbacks_handler, pattern="^(grpbal:|grpgame:)"))
     app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|ftoggle:|fbulk:)"))
     app.add_handler(CallbackQueryHandler(tabchi_menu_callback, pattern="^(menu:tabchi|tabchi:)"))
     app.add_handler(CallbackQueryHandler(ton_paid_user_confirm_callback, pattern="^tonpaid:"))
@@ -3799,10 +5772,12 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_remove_fch_callback, pattern="^rmfch:"))
     app.add_handler(CallbackQueryHandler(menu_router_callback, pattern="^(menu:|buy:rial)"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_pending_login_text_handler))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_commands_handler))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, fallback_pending_login_text_handler))
 
-    logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۰ قابلیت سلف، تبچی هوشمند و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
+    logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۵ قابلیت سلف، قابلیت‌های گروهی، قرعه‌کشی، تیکتینگ و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
+
