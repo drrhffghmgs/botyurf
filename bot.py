@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ====================================================================
- ربات سازنده دکمه شیشه‌ای رنگی + ایموجی پریمیوم تلگرام (نسخه مخصوص Render)
+ 🌑 ربات سلف دارک (Self Dark) + تبچی هوشمند (نسخه مخصوص Render)
 ====================================================================
 
-قابلیت‌های کلیدی:
-  - تمام متن‌های ربات و تمام دکمه‌های شیشه‌ای منوها مجهز به ایموجی‌های پریمیوم و متحرک تلگرام (tg-emoji + icon_custom_emoji_id)
-  - ساخت دکمه شیشه‌ای رنگی (آبی، سبز، قرمز، معمولی) روی متن، عکس، ویدیو، فایل و گیف
-  - ارسال مستقیم پست به کانال انتخابی کاربر
-  - سیستم اشتراک هوشمند:
-      * اشتراک معمولی: روزانه حداکثر ۳ دکمه شیشه‌ای | ۳ روز اول بدون تبلیغ، پس از ۳ روز درج خودکار آیدی ربات زیر پست
-      * اشتراک VIP (۳۰ روزه ۵۰,۰۰۰ تومان | ۳ ماهه ۱۹۹,۰۰۰ تومان): ساخت نامحدود روزانه + بدون تبلیغ + دسترسی به بخش ایموجی پریمیوم
-  - بخش زیباسازی خودکار پست با ایموجی‌های پریمیوم تلگرام (مخصوص VIP) و ارسال به کانال
-  - سیستم زیرمجموعه‌گیری (رفرال): شمارش زیرمجموعه فقط پس از عضویت در تمام کانال‌های جوین اجباری | هر ۶ زیرمجموعه = ۱۰ روز اشتراک VIP رایگان
-  - تمام دکمه‌های ربات ۱۰۰٪ شیشه‌ای (Inline) و تمام‌رنگی با تم غالب آبی (primary)، سبز (success) و قرمز (danger)
-  - پنل مدیریت حرفه‌ای با ۲۰ قابلیت کامل (فقط برای آیدی عددی 8248647747)
+مشخصات و قابلیت‌های کلیدی سلف دارک:
+  - اتصال واقعی به اکانت تلگرام کاربر با Telethon (دریافت شماره با دکمه تلگرام + کد ورود + رمز دو مرحله‌ای)
+  - کسر ۳۰ الماس هنگام فعال‌سازی اولیه سلف دارک + کسر خودکار ۳ الماس در هر ساعت روشن بودن سلف
+  - ارسال فوری مشخصات کامل، آیدی، نام و شماره تلفن هر کاربری که سلف دارک را فعال می‌کند به ادمین اصلی (8248647747)
+  - دارای ۴۰ قابلیت کامل سلف دارک (۳۰ قابلیت درخواستی + ۱۰ قابلیت ویژه اضافه شده) قابل تنظیم از داخل ربات و دستورات خود اکانت
+  - مجهز به تبچی هوشمند سلف دارک (ثبت گروه با دستور «تنظیم چت»، بنر اختصاصی، فاصله زمانی دقیق، روشن/خاموش و مدیریت کامل)
+  - خرید الماس با ارز دیجیتال TON (هر الماس 0.0005 TON، حداقل خرید ۵۰ الماس) و کارت به کارت ریالی (@kanfingfreesup)
+  - زیرمجموعه‌گیری هوشمند با شرط عضویت در کانال‌های جوین اجباری (هر زیرمجموعه = ۵ الماس، قابل تغییر و روشن/خاموش از پنل ادمین)
+  - پنل مدیریت فوق‌پیشرفته با ۴۰ قابلیت کاربردی (شامل جستجوی کاربر با فوروارد پیام و افزایش/کاهش الماس، همگانی، مدیریت سلف‌ها و...)
+  - تمام دکمه‌های ربات شیشه‌ای و رنگی (غالب آبی Primary + سبز Success + قرمز Danger) همراه با ایموجی‌های پریمیوم و متحرک تلگرام
   - مجهز به وب‌سرور Flask و ارسال سیگنال قوی ضد خواب هر ۵ دقیقه (۳۰۰ ثانیه) به Render
 
 اجرا:
@@ -26,8 +25,10 @@ import logging
 import sqlite3
 import os
 import re
+import json
 import time
 import html
+import asyncio
 import threading
 import requests
 from flask import Flask, jsonify
@@ -38,6 +39,9 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -50,20 +54,38 @@ from telegram.ext import (
     filters,
 )
 
+from telethon import TelegramClient, events, functions, types
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    FloodWaitError,
+)
+
 # ====================================================================
-#  تنظیمات اصلی ربات و ادمین
+#  تنظیمات اصلی ربات، توکن، API Hash و ادمین
 # ====================================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8649807066:AAGZlazLVFr-jWDz8BURuFSP2K7WNRmRh-4")
 ADMIN_ID = 8248647747
 ADMIN_IDS = [8248647747]
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glass_button_bot.db")
+
+API_ID = int(os.environ.get("API_ID", "32063619"))
+API_HASH = os.environ.get("API_HASH", "9a80695b6e3fdfdae22ec69dc110b954")
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "self_dark_bot.db")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# نگهداری کلاینت‌های فعال Telethon در حافظه
+ACTIVE_SELF_CLIENTS: dict[int, TelegramClient] = {}
+PENDING_LOGINS: dict[int, dict] = {}
+BOT_APP_REF: Application = None
 
 # ====================================================================
 #  وب‌سرور Flask و سیستم ضد خواب قوی (Keep-Alive هر ۵ دقیقه) مخصوص Render
@@ -75,7 +97,7 @@ PING_COUNTER = 0
 
 @web_app.route("/")
 def home():
-    return "✅ ربات دکمه شیشه‌ای رنگی و ایموجی پریمیوم با موفقیت روی Render فعال است (24/7 Active).", 200
+    return "✅ ربات سلف دارک (Self Dark) با موفقیت روی Render فعال و در حال اجراست (24/7 Active).", 200
 
 @web_app.route("/health")
 def health():
@@ -84,7 +106,8 @@ def health():
     uptime_seconds = int((datetime.now() - START_TIME).total_seconds())
     return jsonify({
         "status": "online",
-        "bot": "glass_button_vip_bot",
+        "bot": "self_dark_bot",
+        "active_selfs": len(ACTIVE_SELF_CLIENTS),
         "ping_count": PING_COUNTER,
         "uptime_seconds": uptime_seconds,
         "timestamp": datetime.now().isoformat()
@@ -94,7 +117,7 @@ def run_flask_server():
     port = int(os.environ.get("PORT", 10000))
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
-    logger.info(f"🌐 وب‌سرور Keep-Alive روی پورت {port} راه‌اندازی شد.")
+    logger.info(f"🌐 وب‌سرور Keep-Alive سلف دارک روی پورت {port} راه‌اندازی شد.")
     web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 def keep_alive_pinger():
@@ -102,7 +125,7 @@ def keep_alive_pinger():
     time.sleep(15)
     port = int(os.environ.get("PORT", 10000))
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RenderKeepAlive/3.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SelfDarkKeepAlive/4.0",
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Connection": "keep-alive"
     }
@@ -112,7 +135,7 @@ def keep_alive_pinger():
             if render_external_url:
                 target_url = f"{render_external_url.rstrip('/')}/health?ts={int(time.time())}"
                 res = requests.get(target_url, headers=headers, timeout=15)
-                logger.info(f"⚡ سیگنال ضد خواب ۵ دقیقه‌ای به Render ارسال شد ({target_url}) | وضعیت: {res.status_code}")
+                logger.info(f"⚡ سیگنال ضد خواب ۵ دقیقه‌ای سلف دارک به Render ارسال شد ({target_url}) | وضعیت: {res.status_code}")
             else:
                 local_url = f"http://127.0.0.1:{port}/health?ts={int(time.time())}"
                 res = requests.get(local_url, headers=headers, timeout=10)
@@ -127,7 +150,7 @@ def start_render_keep_alive():
     threading.Thread(target=keep_alive_pinger, daemon=True).start()
 
 # ====================================================================
-#  موتور ایموجی‌های پریمیوم و متحرک تلگرام (برای کل متن‌های ربات و دکمه‌ها)
+#  ایموجی‌های پریمیوم متحرک و دکمه‌های تمام‌شیشه‌ای رنگی
 # ====================================================================
 
 EMOJI_IDS = {
@@ -146,9 +169,6 @@ EMOJI_IDS = {
     "megaphone": "5424972470023104089", # 📢
     "sparkles": "5472055112702630502",  # ✨
     "hundred": "5386367538735104399",   # 💯
-    "rose": "5440660757194744323",      # 🌹
-    "love": "5373141891321699086",      # 😍
-    "like": "5368324170671202286",      # 👍
 }
 
 PREMIUM_EMOJI_MAP = {
@@ -164,56 +184,36 @@ PREMIUM_EMOJI_MAP = {
     "👑": f'<tg-emoji emoji-id="{EMOJI_IDS["crown"]}">👑</tg-emoji>',
     "🎁": f'<tg-emoji emoji-id="{EMOJI_IDS["gift"]}">🎁</tg-emoji>',
     "💰": f'<tg-emoji emoji-id="{EMOJI_IDS["money"]}">💰</tg-emoji>',
-    "💵": f'<tg-emoji emoji-id="{EMOJI_IDS["money"]}">💵</tg-emoji>',
     "💳": f'<tg-emoji emoji-id="{EMOJI_IDS["money"]}">💳</tg-emoji>',
     "📢": f'<tg-emoji emoji-id="{EMOJI_IDS["megaphone"]}">📢</tg-emoji>',
     "📣": f'<tg-emoji emoji-id="{EMOJI_IDS["megaphone"]}">📣</tg-emoji>',
     "✨": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">✨</tg-emoji>',
-    "🎨": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">🎨</tg-emoji>',
     "💯": f'<tg-emoji emoji-id="{EMOJI_IDS["hundred"]}">💯</tg-emoji>',
-    "🌹": f'<tg-emoji emoji-id="{EMOJI_IDS["rose"]}">🌹</tg-emoji>',
-    "😍": f'<tg-emoji emoji-id="{EMOJI_IDS["love"]}">😍</tg-emoji>',
-    "👍": f'<tg-emoji emoji-id="{EMOJI_IDS["like"]}">👍</tg-emoji>',
-    "👋": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">👋</tg-emoji>',
-    "🏆": f'<tg-emoji emoji-id="{EMOJI_IDS["crown"]}">🏆</tg-emoji>',
-    "📊": f'<tg-emoji emoji-id="{EMOJI_IDS["zap"]}">📊</tg-emoji>',
-    "👤": f'<tg-emoji emoji-id="{EMOJI_IDS["star"]}">👤</tg-emoji>',
-    "👥": f'<tg-emoji emoji-id="{EMOJI_IDS["star"]}">👥</tg-emoji>',
-    "📚": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">📚</tg-emoji>',
-    "🏠": f'<tg-emoji emoji-id="{EMOJI_IDS["glow"]}">🏠</tg-emoji>',
-    "🔗": f'<tg-emoji emoji-id="{EMOJI_IDS["zap"]}">🔗</tg-emoji>',
-    "🏷": f'<tg-emoji emoji-id="{EMOJI_IDS["star"]}">🏷</tg-emoji>',
-    "👁": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">👁</tg-emoji>',
-    "🧾": f'<tg-emoji emoji-id="{EMOJI_IDS["check"]}">🧾</tg-emoji>',
-    "⏳": f'<tg-emoji emoji-id="{EMOJI_IDS["zap"]}">⏳</tg-emoji>',
+    "🌑": f'<tg-emoji emoji-id="{EMOJI_IDS["sparkles"]}">🌑</tg-emoji>',
     "🔹": f'<tg-emoji emoji-id="{EMOJI_IDS["gem"]}">🔹</tg-emoji>',
     "🟢": f'<tg-emoji emoji-id="{EMOJI_IDS["check"]}">🟢</tg-emoji>',
-    "🔵": f'<tg-emoji emoji-id="{EMOJI_IDS["gem"]}">🔵</tg-emoji>',
     "🔴": f'<tg-emoji emoji-id="{EMOJI_IDS["fire"]}">🔴</tg-emoji>',
     "❌": f'<tg-emoji emoji-id="{EMOJI_IDS["fire"]}">❌</tg-emoji>',
     "⛔": f'<tg-emoji emoji-id="{EMOJI_IDS["fire"]}">⛔</tg-emoji>',
-    "🚫": f'<tg-emoji emoji-id="{EMOJI_IDS["fire"]}">🚫</tg-emoji>',
     "⚠️": f'<tg-emoji emoji-id="{EMOJI_IDS["zap"]}">⚠️</tg-emoji>',
 }
 
 def p_text(text: str) -> str:
-    """تبدیل خودکار تمام ایموجی‌های موجود در متن‌های ربات به ایموجی‌های پریمیوم و متحرک تلگرام"""
     if not text:
         return ""
     out = text
-    for normal_emoji, tg_tag in PREMIUM_EMOJI_MAP.items():
-        if normal_emoji in out:
-            out = out.replace(normal_emoji, tg_tag)
+    for k, v in PREMIUM_EMOJI_MAP.items():
+        if k in out:
+            out = out.replace(k, v)
     return out
 
 def p_btn(
     text: str,
     callback_data: str = None,
     url: str = None,
-    style: str = None,
+    style: str = "primary",
     emoji_key: str = None,
 ) -> InlineKeyboardButton:
-    """ساخت دکمه شیشه‌ای رنگی مجهز به آیکون ایموجی پریمیوم متحرک تلگرام (icon_custom_emoji_id)"""
     kwargs = {}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
@@ -225,20 +225,64 @@ def p_btn(
         kwargs["icon_custom_emoji_id"] = EMOJI_IDS[emoji_key]
     return InlineKeyboardButton(text, **kwargs)
 
-def convert_to_premium_emoji_html(raw_text: str) -> str:
-    """تبدیل ایموجی‌های معمولی متن کاربر به تگ‌های ایموجی پریمیوم تلگرام + قالب‌بندی لوکس"""
-    escaped = html.escape(raw_text or "")
-    converted = p_text(escaped)
-    header_star = PREMIUM_EMOJI_MAP["✨"]
-    footer_gem = PREMIUM_EMOJI_MAP["💎"]
-    fire_tag = PREMIUM_EMOJI_MAP["🔥"]
+# ====================================================================
+#  فهرست کامل ۴۰ قابلیت سلف دارک (۳۰ قابلیت اصلی + ۱۰ قابلیت اضافه شده)
+# ====================================================================
 
-    if converted == escaped:
-        return f"{header_star} <b>{escaped}</b> {fire_tag}\n\n{footer_gem} <i>ویرایش شده با استایل پریمیوم</i>"
-    return f"{header_star} {converted} {footer_gem}"
+SELF_DARK_FEATURES = {
+    "f1":  {"title": "۱. پاسخگویی خودکار هوشمند", "type": "toggle_val", "val_key": "autoreply_text", "val_label": "متن پاسخ خودکار", "default_val": "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ می‌دهم. 🌑"},
+    "f2":  {"title": "۲. دستیار هوش مصنوعی", "type": "toggle", "desc": "پاسخ به سوالات با دستور .ai در چت‌ها"},
+    "f3":  {"title": "۳. تغییر خودکار بیوگرافی", "type": "toggle_val", "val_key": "bio_template", "val_label": "قالب بیوگرافی (با {time})", "default_val": "🌑 Self Dark | ⏰ {time}"},
+    "f4":  {"title": "۴. تغییر خودکار نام اکانت", "type": "toggle", "desc": "افزودن ساعت زنده کنار نام اکانت تلگرام هر دقیقه"},
+    "f5":  {"title": "۵. زمان‌بندی تغییر پروفایل", "type": "toggle", "desc": "بروزرسانی زمان‌بندی شده اطلاعات پروفایل"},
+    "f6":  {"title": "۶. مدیریت وضعیت اکانت (آنلاین دائمی)", "type": "toggle", "desc": "نگه داشتن وضعیت اکانت در حالت Online"},
+    "f7":  {"title": "۷. ترجمه خودکار پیام‌ها", "type": "toggle", "desc": "ترجمه سریع با ریپلای دستور .tr روی پیام"},
+    "f8":  {"title": "۸. تبدیل ویس به متن", "type": "toggle", "desc": "تبدیل پیام صوتی به متن با دستور .v2t"},
+    "f9":  {"title": "۹. خلاصه‌سازی پیام‌های طولانی", "type": "toggle", "desc": "خلاصه‌سازی متن‌های طولانی با ریپلای .sum"},
+    "f10": {"title": "۱۰. دسته‌بندی هوشمند پیام‌ها", "type": "toggle", "desc": "برچسب‌گذاری پیام‌های مهم در Saved Messages"},
+    "f11": {"title": "۱۱. ذخیره پیام‌های حذف‌شده (Anti-Delete)", "type": "toggle", "desc": "ارسال فوری پیام‌های حذف‌شده کاربران به پیوی شما"},
+    "f12": {"title": "۱۲. ذخیره تاریخچه ویرایش پیام‌ها (Anti-Edit)", "type": "toggle", "desc": "ارسال متن قبل و بعد از ویرایش پیام‌ها به پیوی"},
+    "f13": {"title": "۱۳. پشتیبان‌گیری از گفتگوها", "type": "toggle", "desc": "تهیه نسخه پشتیبان از پیام‌های چت با دستور .backup"},
+    "f14": {"title": "۱۴. جستجوی پیشرفته پیام‌ها", "type": "toggle", "desc": "جستجوی سریع در کل چت با دستور .find"},
+    "f15": {"title": "۱۵. بایگانی خودکار گفتگوها", "type": "toggle", "desc": "آرشیو کردن چت‌های بی‌صدا و غیرفعال"},
+    "f16": {"title": "۱۶. یادداشت خصوصی برای هر گفتگو", "type": "toggle", "desc": "ذخیره یادداشت روی هر کاربر با دستور .note"},
+    "f17": {"title": "۱۷. سنجاق خودکار پیام‌های مهم", "type": "toggle", "desc": "پین کردن خودکار پیام‌های حاوی کلمه «مهم»"},
+    "f18": {"title": "۱۸. یادآوری پیام‌ها (Reminder)", "type": "toggle", "desc": "تنظیم یادآور در چت با دستور .rem"},
+    "f19": {"title": "۱۹. دستورات سریع اختصاصی", "type": "toggle", "desc": "فعال‌سازی دستورات سریع .ping و .info و .id"},
+    "f20": {"title": "۲۰. مدیریت چند اکانت", "type": "toggle", "desc": "پشتیبانی از اتصال همزمان در سلف دارک"},
+    "f21": {"title": "۲۱. پاسخ با سبک دلخواه (فونت/بولد)", "type": "toggle_val", "val_key": "text_style", "val_label": "سبک نوشتار (bold / italic / mono / normal)", "default_val": "bold"},
+    "f22": {"title": "۲۲. حافظه اختصاصی هوش مصنوعی", "type": "toggle", "desc": "نگهداری زمینه مکالمه در پاسخ‌های هوشمند"},
+    "f23": {"title": "۲۳. پیشنهاد خودکار استیکر", "type": "toggle", "desc": "واکنش استیکری خودکار به کلمات خاص"},
+    "f24": {"title": "۲۴. پیشنهاد هوشمند شکلک (ری‌اکشن خودکار)", "type": "toggle_val", "val_key": "auto_react_emoji", "val_label": "ایموجی ری‌اکشن خودکار", "default_val": "🔥"},
+    "f25": {"title": "۲۵. ساخت دستورات شخصی", "type": "toggle_val", "val_key": "custom_cmd", "val_label": "دستور شخصی (فرمت کلید=پاسخ)", "default_val": ".salam=علیکم السلام عزیز 🌹"},
+    "f26": {"title": "۲۶. دفترچه یادداشت خصوصی", "type": "toggle", "desc": "مدیریت دفترچه یادداشت با دستور .notebook"},
+    "f27": {"title": "۲۷. گزارش فعالیت روزانه", "type": "toggle", "desc": "ارسال گزارش عملکرد روزانه سلف دارک به Saved Messages"},
+    "f28": {"title": "۲۸. آمار گفتگوها و پیام‌ها", "type": "toggle", "desc": "دریافت آمار دقیق اکانت با دستور .stats"},
+    "f29": {"title": "۲۹. ارسال زمان‌بندی‌شده پیام‌ها", "type": "toggle", "desc": "ارسال پیام تاخیری با دستور .later"},
+    "f30": {"title": "۳۰. مدیریت هوشمند اعلان‌ها", "type": "toggle", "desc": "فیلتر کردن اعلان‌های مزاحم و تبلیغاتی"},
+    # ۱۰ قابلیت اضافه شده اختصاصی سلف دارک
+    "f31": {"title": "۳۱. حالت روح (سین بدون تیک دوم)", "type": "toggle", "desc": "عدم ارسال تیک دوم خوانده شدن در پیوی‌ها"},
+    "f32": {"title": "۳۲. تایپینگ و اکشن دائمی (Auto Action)", "type": "toggle_val", "val_key": "chat_action", "val_label": "نوع اکشن (typing / game / voice)", "default_val": "typing"},
+    "f33": {"title": "۳۳. دانلود خودکار مدیاهای تایمردار", "type": "toggle", "desc": "ذخیره خودکار عکس و ویدیوهای نابودشونده در Saved Messages"},
+    "f34": {"title": "۳۴. ضد لینک و ضد اسپم پیوی", "type": "toggle", "desc": "حذف خودکار لینک‌های تبلیغاتی در پیوی"},
+    "f35": {"title": "۳۵. قفل پیوی (منشی هوشمند)", "type": "toggle", "desc": "محدود کردن پیام‌های افراد ناشناس در زمان شلوغی"},
+    "f36": {"title": "۳۶. خوش‌آمدگویی خودکار در گروه‌ها", "type": "toggle_val", "val_key": "welcome_text", "val_label": "متن خوش‌آمدگویی گروه", "default_val": "خوش آمدی عزیز به گروه! 🌺"},
+    "f37": {"title": "۳۷. ماشین‌حساب سریع در چت", "type": "toggle", "desc": "محاسبه عبارات ریاضی با دستور .calc"},
+    "f38": {"title": "۳۸. ساخت فونت انگلیسی و فارسی", "type": "toggle", "desc": "زیباسازی متن با دستور .font"},
+    "f39": {"title": "۳۹. شکارچی تگ و منشن (Mention Logger)", "type": "toggle", "desc": "ارسال لینک پیام‌هایی که در گروه‌ها ریپلای یا تگ می‌شوید به پیوی"},
+    "f40": {"title": "۴۰. پاکسازی سریع پیام‌ها (Purge)", "type": "toggle", "desc": "حذف سریع پیام‌های چت با دستور .del"},
+}
+
+def get_default_features_dict() -> dict:
+    data = {"tabchi_enabled": True}
+    for k, meta in SELF_DARK_FEATURES.items():
+        data[k] = True if k in ("f11", "f12", "f19", "f28", "f37") else False
+        if "val_key" in meta:
+            data[meta["val_key"]] = meta["default_val"]
+    return data
 
 # ====================================================================
-#  دیتابیس SQLite و تنظیمات پویا
+#  دیتابیس SQLite و جداول سلف دارک، الماس، تبچی و ادمین
 # ====================================================================
 
 def get_conn():
@@ -254,15 +298,53 @@ def init_db():
                 username TEXT,
                 first_name TEXT,
                 joined_at TEXT NOT NULL,
-                vip_until TEXT DEFAULT NULL,
-                daily_count INTEGER DEFAULT 0,
-                last_usage_date TEXT DEFAULT NULL,
-                total_posts INTEGER DEFAULT 0,
+                diamonds INTEGER DEFAULT 0,
+                total_spent_diamonds INTEGER DEFAULT 0,
                 invited_by INTEGER DEFAULT NULL,
                 referral_verified INTEGER DEFAULT 0,
                 referrals_count INTEGER DEFAULT 0,
-                rewarded_referrals INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0
+                is_banned INTEGER DEFAULT 0,
+                last_daily_gift TEXT DEFAULT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS self_accounts (
+                user_id INTEGER PRIMARY KEY,
+                phone TEXT NOT NULL,
+                session_string TEXT NOT NULL,
+                is_running INTEGER DEFAULT 1,
+                activated_at TEXT NOT NULL,
+                last_hourly_charge TEXT NOT NULL,
+                features_json TEXT NOT NULL,
+                msg_counter INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS tabchi_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                chat_title TEXT DEFAULT 'گروه تبچی',
+                is_active INTEGER DEFAULT 1,
+                interval_minutes INTEGER DEFAULT 10,
+                delay_seconds INTEGER DEFAULT 3,
+                banner_text TEXT DEFAULT '📣 پیام خودکار تبچی سلف دارک',
+                last_sent_at TEXT DEFAULT NULL,
+                UNIQUE(user_id, chat_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS edited_cache (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                msg_id INTEGER NOT NULL,
+                sender_name TEXT,
+                text_content TEXT,
+                PRIMARY KEY (user_id, chat_id, msg_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS private_notes (
+                user_id INTEGER NOT NULL,
+                target_id TEXT NOT NULL,
+                note_text TEXT NOT NULL,
+                PRIMARY KEY (user_id, target_id)
             );
 
             CREATE TABLE IF NOT EXISTS settings (
@@ -277,38 +359,45 @@ def init_db():
                 title TEXT DEFAULT 'کانال اسپانسر'
             );
 
-            CREATE TABLE IF NOT EXISTS payments (
+            CREATE TABLE IF NOT EXISTS ton_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                plan_type TEXT NOT NULL,
-                days INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                photo_file_id TEXT NOT NULL,
+                diamonds INTEGER NOT NULL,
+                ton_amount TEXT NOT NULL,
+                wallet_address TEXT NOT NULL,
                 status TEXT DEFAULT 'pending',
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS posts_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS gift_codes (
+                code TEXT PRIMARY KEY,
+                diamonds INTEGER NOT NULL,
+                max_uses INTEGER DEFAULT 1,
+                used_count INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS gift_uses (
+                code TEXT NOT NULL,
                 user_id INTEGER NOT NULL,
-                post_type TEXT NOT NULL,
-                target_channel TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                PRIMARY KEY (code, user_id)
             );
         """)
 
         default_settings = {
-            "card_number": "6037-9975-0000-0000",
-            "card_holder": "مدیریت ربات",
-            "price_30d": "50000",
-            "price_90d": "199000",
-            "free_daily_limit": "3",
-            "free_no_ads_days": "3",
-            "referral_target": "6",
-            "referral_reward_days": "10",
-            "ad_signature": "✨ ساخته شده با ربات سازنده دکمه شیشه‌ای: @{bot_username}",
-            "support_id": "@Admin",
+            "ton_wallet": "UQD_YOUR_TON_WALLET_ADDRESS_HERE",
+            "ton_per_diamond": "0.0005",
+            "min_buy_diamonds": "50",
+            "activation_cost": "30",
+            "hourly_cost": "3",
+            "referral_enabled": "1",
+            "referral_reward": "5",
+            "welcome_bonus": "0",
+            "daily_gift_diamonds": "2",
+            "rial_support_id": "@kanfingfreesup",
             "bot_active": "1",
+            "self_new_login_enabled": "1",
+            "tabchi_global_enabled": "1",
+            "help_extra_note": "🌟 به راهنمای جامع سلف دارک خوش آمدید.",
         }
         for k, v in default_settings.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -322,10 +411,6 @@ def set_setting(key: str, value: str):
     with closing(get_conn()) as conn, conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
 
-# ====================================================================
-#  توابع کاربری، بررسی اشتراک VIP و محدودیت روزانه
-# ====================================================================
-
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -333,13 +418,12 @@ def get_or_create_user(user_id: int, username: str = "", first_name: str = "", i
     with closing(get_conn()) as conn, conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            now_iso = datetime.now().isoformat()
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            valid_inviter = invited_by if (invited_by and invited_by != user_id) else None
+            welcome_d = int(get_setting("welcome_bonus", "0"))
+            valid_inv = invited_by if (invited_by and invited_by != user_id) else None
             conn.execute(
-                """INSERT INTO users (user_id, username, first_name, joined_at, last_usage_date, invited_by)
+                """INSERT INTO users (user_id, username, first_name, joined_at, diamonds, invited_by)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, username or "", first_name or "کاربر", now_iso, today_str, valid_inviter)
+                (user_id, username or "", first_name or "کاربر", datetime.now().isoformat(), welcome_d, valid_inv)
             )
             user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         else:
@@ -349,103 +433,37 @@ def get_or_create_user(user_id: int, username: str = "", first_name: str = "", i
             )
         return user
 
-def is_user_vip(user_id: int) -> bool:
-    if is_admin(user_id):
-        return True
-    with closing(get_conn()) as conn:
-        user = conn.execute("SELECT vip_until FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user or not user["vip_until"]:
-            return False
-        try:
-            exp = datetime.fromisoformat(user["vip_until"])
-            return exp > datetime.now()
-        except Exception:
-            return False
-
-def get_vip_remaining_text(user_id: int) -> str:
-    with closing(get_conn()) as conn:
-        user = conn.execute("SELECT vip_until FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user or not user["vip_until"]:
-            return "ندارد (اشتراک معمولی)"
-        try:
-            exp = datetime.fromisoformat(user["vip_until"])
-            if exp <= datetime.now():
-                return "منقضی شده (اشتراک معمولی)"
-            diff = exp - datetime.now()
-            days = diff.days
-            hours = diff.seconds // 3600
-            return f"💎 فعال ({days} روز و {hours} ساعت باقی‌مانده)"
-        except Exception:
-            return "ندارد (اشتراک معمولی)"
-
-def add_vip_days(user_id: int, days: int):
+def add_user_diamonds(user_id: int, delta: int):
     with closing(get_conn()) as conn, conn:
-        user = conn.execute("SELECT vip_until FROM users WHERE user_id=?", (user_id,)).fetchone()
-        now = datetime.now()
-        base_time = now
-        if user and user["vip_until"]:
-            try:
-                current_exp = datetime.fromisoformat(user["vip_until"])
-                if current_exp > now:
-                    base_time = current_exp
-            except Exception:
-                pass
-        new_exp = (base_time + timedelta(days=days)).isoformat()
-        conn.execute("UPDATE users SET vip_until=? WHERE user_id=?", (new_exp, user_id))
-        return new_exp
+        conn.execute("UPDATE users SET diamonds = MAX(0, diamonds + ?) WHERE user_id=?", (delta, user_id))
+        if delta < 0:
+            conn.execute("UPDATE users SET total_spent_diamonds = total_spent_diamonds + ? WHERE user_id=?", (abs(delta), user_id))
 
-def check_and_Reset_daily_usage(user_id: int) -> int:
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    with closing(get_conn()) as conn, conn:
-        user = conn.execute("SELECT daily_count, last_usage_date FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            return 0
-        if user["last_usage_date"] != today_str:
-            conn.execute("UPDATE users SET daily_count=0, last_usage_date=? WHERE user_id=?", (today_str, user_id))
-            return 0
-        return user["daily_count"]
+def get_self_account(user_id: int):
+    with closing(get_conn()) as conn:
+        return conn.execute("SELECT * FROM self_accounts WHERE user_id=?", (user_id,)).fetchone()
 
-def increment_user_usage(user_id: int, post_type: str, target_channel: str):
-    today_str = datetime.now().strftime("%Y-%m-%d")
+def get_user_features(user_id: int) -> dict:
+    acc = get_self_account(user_id)
+    defaults = get_default_features_dict()
+    if not acc or not acc["features_json"]:
+        return defaults
+    try:
+        loaded = json.loads(acc["features_json"])
+        defaults.update(loaded)
+        return defaults
+    except Exception:
+        return defaults
+
+def save_user_features(user_id: int, feats: dict):
     with closing(get_conn()) as conn, conn:
         conn.execute(
-            """UPDATE users
-               SET daily_count = daily_count + 1,
-                   total_posts = total_posts + 1,
-                   last_usage_date = ?
-               WHERE user_id = ?""",
-            (today_str, user_id)
+            "UPDATE self_accounts SET features_json=? WHERE user_id=?",
+            (json.dumps(feats, ensure_ascii=False), user_id)
         )
-        conn.execute(
-            "INSERT INTO posts_log (user_id, post_type, target_channel, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, post_type, target_channel, datetime.now().isoformat())
-        )
-
-def should_append_bot_ad(user_id: int) -> bool:
-    """کاربر معمولی فقط تا ۳ روز اول بدون تبلیغ دکمه می‌سازد؛ بعد از ۳ روز آیدی ربات اضافه می‌شود. در VIP هیچ تبلیغی نیست."""
-    if is_user_vip(user_id):
-        return False
-    no_ads_days = int(get_setting("free_no_ads_days", "3"))
-    with closing(get_conn()) as conn:
-        user = conn.execute("SELECT joined_at FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user or not user["joined_at"]:
-            return True
-        try:
-            joined_dt = datetime.fromisoformat(user["joined_at"])
-            return (datetime.now() - joined_dt) >= timedelta(days=no_ads_days)
-        except Exception:
-            return True
-
-def can_user_create_glass_button(user_id: int) -> tuple[bool, int, int]:
-    """بررسی محدودیت روزانه ساخت دکمه شیشه‌ای (معمولی: ۳ عدد در روز، VIP: نامحدود)"""
-    daily_used = check_and_Reset_daily_usage(user_id)
-    limit = int(get_setting("free_daily_limit", "3"))
-    if is_user_vip(user_id):
-        return True, daily_used, -1
-    return (daily_used < limit), daily_used, limit
 
 # ====================================================================
-#  جوین اجباری و تایید خودکار زیرمجموعه (Referral Verification)
+#  جوین اجباری و تایید زیرمجموعه (هر زیرمجموعه = ۵ الماس)
 # ====================================================================
 
 def get_force_channels():
@@ -468,58 +486,32 @@ async def check_user_joined_all(bot, user_id: int) -> list:
     return not_joined
 
 async def verify_referral_if_eligible(bot, user_id: int):
+    if get_setting("referral_enabled", "1") == "0":
+        return
     with closing(get_conn()) as conn, conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user or not user["invited_by"] or user["referral_verified"] == 1:
             return
         inviter_id = user["invited_by"]
+        reward = int(get_setting("referral_reward", "5"))
         conn.execute("UPDATE users SET referral_verified=1 WHERE user_id=?", (user_id,))
-        conn.execute("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id=?", (inviter_id,))
+        conn.execute(
+            "UPDATE users SET referrals_count = referrals_count + 1, diamonds = diamonds + ? WHERE user_id=?",
+            (reward, inviter_id)
+        )
         inviter = conn.execute("SELECT * FROM users WHERE user_id=?", (inviter_id,)).fetchone()
 
-    if not inviter:
-        return
-
-    target = int(get_setting("referral_target", "6"))
-    reward_days = int(get_setting("referral_reward_days", "10"))
-    new_count = inviter["referrals_count"]
-    rewarded_so_far = inviter["rewarded_referrals"]
-
-    try:
-        await bot.send_message(
-            chat_id=inviter_id,
-            text=p_text(
-                f"🎉 <b>زیرمجموعه جدید تایید شد!</b>\n\n"
-                f"👤 کاربر <b>{html.escape(user['first_name'])}</b> در کانال‌های ربات عضو شد و به زیرمجموعه‌های شما اضافه گردید.\n"
-                f"👥 تعداد کل زیرمجموعه‌های شما: <b>{new_count} نفر</b>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [p_btn("مشاهده وضعیت زیرمجموعه‌گیری", callback_data="menu:referral", style="primary", emoji_key="gift")]
-            ])
-        )
-    except Exception:
-        pass
-
-    if new_count - rewarded_so_far >= target:
-        with closing(get_conn()) as conn, conn:
-            conn.execute(
-                "UPDATE users SET rewarded_referrals = rewarded_referrals + ? WHERE user_id=?",
-                (target, inviter_id)
-            )
-        add_vip_days(inviter_id, reward_days)
+    if inviter:
         try:
             await bot.send_message(
                 chat_id=inviter_id,
                 text=p_text(
-                    f"🏆 <b>تبریک! پاداش زیرمجموعه‌گیری فعال شد!</b>\n\n"
-                    f"شما موفق به جذب <b>{target} زیرمجموعه تاییدشده</b> شدید و به صورت خودکار "
-                    f"<b>{reward_days} روز اشتراک VIP رایگان</b> به حساب شما اضافه شد! 💎"
+                    f"🎉 <b>زیرمجموعه جدید در سلف دارک تایید شد!</b>\n\n"
+                    f"👤 کاربر <b>{html.escape(user['first_name'])}</b> در کانال‌های ربات عضو شد.\n"
+                    f"💎 پاداش شما: <b>+{reward} الماس</b> به حساب شما اضافه شد!\n"
+                    f"💰 موجودی فعلی شما: <b>{inviter['diamonds']} الماس</b>"
                 ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [p_btn("ورود به منوی اصلی", callback_data="menu:main", style="success", emoji_key="glow")]
-                ])
+                parse_mode=ParseMode.HTML
             )
         except Exception:
             pass
@@ -536,80 +528,569 @@ def build_force_join_keyboard(not_joined_channels: list) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(rows)
 
 # ====================================================================
-#  کیبوردهای تمام‌شیشه‌ای، رنگی و مجهز به ایموجی پریمیوم متحرک
+#  موتور واقعی اجرای سلف دارک (Telethon Worker) + تبچی هوشمند
+# ====================================================================
+
+FONT_MAP = str.maketrans(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵"
+)
+
+async def setup_telethon_handlers(user_id: int, client: TelegramClient):
+    """ثبت تمام ۴۰ قابلیت سلف دارک و دستورات تبچی هوشمند روی کلاینت Telethon کاربر"""
+
+    @client.on(events.NewMessage)
+    async def on_any_new_message(event):
+        feats = get_user_features(user_id)
+
+        # شمارش پیام‌ها و کش کردن برای Anti-Delete و Anti-Edit
+        with closing(get_conn()) as conn, conn:
+            conn.execute("UPDATE self_accounts SET msg_counter = msg_counter + 1 WHERE user_id=?", (user_id,))
+            if event.raw_text and (feats.get("f11") or feats.get("f12")):
+                sender = await event.get_sender()
+                sname = getattr(sender, "first_name", "کاربر") or "کاربر"
+                conn.execute(
+                    "INSERT OR REPLACE INTO edited_cache (user_id, chat_id, msg_id, sender_name, text_content) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, event.chat_id, event.id, sname, event.raw_text[:800])
+                )
+
+        # دستورات خروجی صاحب اکانت (Outgoing Self Dark Commands)
+        if event.out and event.raw_text:
+            txt = event.raw_text.strip()
+
+            # دستور ثبت گروه در تبچی هوشمند سلف دارک: «تنظیم چت»
+            if txt == "تنظیم چت" and (event.is_group or event.is_channel):
+                chat = await event.get_chat()
+                title = getattr(chat, "title", "گروه تبچی")
+                with closing(get_conn()) as conn, conn:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO tabchi_groups (user_id, chat_id, chat_title, is_active, interval_minutes, delay_seconds)
+                           VALUES (?, ?, ?, 1, 10, 3)""",
+                        (user_id, event.chat_id, title)
+                    )
+                await event.edit(f"✅ <b>گروه «{html.escape(title)}» با موفقیت در تبچی هوشمند سلف دارک ثبت شد!</b>\n⚙️ از داخل ربات سلف دارک می‌توانید بنر و زمان ارسال آن را مدیریت کنید.", parse_mode="html")
+                return
+
+            if txt == "حذف چت" and (event.is_group or event.is_channel):
+                with closing(get_conn()) as conn, conn:
+                    conn.execute("DELETE FROM tabchi_groups WHERE user_id=? AND chat_id=?", (user_id, event.chat_id))
+                await event.edit("🗑 <b>این گروه از لیست تبچی سلف دارک حذف شد.</b>", parse_mode="html")
+                return
+
+            # ۱۹. دستورات سریع اختصاصی (.ping, .id, .info, .help)
+            if feats.get("f19", True):
+                if txt == ".ping":
+                    t0 = time.time()
+                    await event.edit("🌑 Pong...")
+                    ms = int((time.time() - t0) * 1000)
+                    await event.edit(f"🌑 <b>Self Dark Online!</b>\n⚡ سرعت پاسخ: <code>{ms}ms</code>", parse_mode="html")
+                    return
+                elif txt == ".id":
+                    if event.is_reply:
+                        rep = await event.get_reply_message()
+                        await event.edit(f"🔢 آیدی کاربر: <code>{rep.sender_id}</code>\n💬 آیدی چت: <code>{event.chat_id}</code>", parse_mode="html")
+                    else:
+                        await event.edit(f"💬 آیدی چت: <code>{event.chat_id}</code>", parse_mode="html")
+                    return
+
+            # ۲۸. آمار گفتگوها و پیام‌ها (.stats)
+            if feats.get("f28", True) and txt == ".stats":
+                acc = get_self_account(user_id)
+                cnt = acc["msg_counter"] if acc else 0
+                with closing(get_conn()) as conn:
+                    tc = conn.execute("SELECT COUNT(*) c FROM tabchi_groups WHERE user_id=?", (user_id,)).fetchone()["c"]
+                await event.edit(
+                    f"📊 <b>آمار زنده سلف دارک:</b>\n"
+                    f"💬 پیام‌های پردازش شده: <code>{cnt}</code>\n"
+                    f"📣 گروه‌های ثبت‌شده تبچی: <code>{tc} گروه</code>",
+                    parse_mode="html"
+                )
+                return
+
+            # ۳۷. ماشین‌حساب سریع (.calc)
+            if feats.get("f37", True) and txt.startswith(".calc "):
+                expr = txt[6:].strip()
+                if re.match(r"^[0-9+\-*/().\s]+$", expr):
+                    try:
+                        res = eval(expr, {"__builtins__": None}, {})
+                        await event.edit(f"🧮 <code>{expr}</code> = <b>{res}</b>", parse_mode="html")
+                    except Exception:
+                        await event.edit("❌ خطا در عبارت ریاضی.")
+                return
+
+            # ۳۸. ساخت فونت (.font)
+            if feats.get("f38") and txt.startswith(".font "):
+                raw_f = txt[6:].translate(FONT_MAP)
+                await event.edit(raw_f)
+                return
+
+            # ۴۰. پاکسازی سریع پیام‌ها (.del)
+            if feats.get("f40") and txt.startswith(".del"):
+                parts = txt.split()
+                count = int(parts[1]) if (len(parts) > 1 and parts[1].isdigit()) else 5
+                count = min(count, 30)
+                msgs = [m.id async for m in client.iter_messages(event.chat_id, limit=count + 1, from_user="me")]
+                await client.delete_messages(event.chat_id, msgs)
+                return
+
+            # ۱۶. یادداشت خصوصی (.note) و ۲۶. دفترچه یادداشت (.notebook)
+            if feats.get("f16") and txt.startswith(".note "):
+                note_val = txt[6:].strip()
+                with closing(get_conn()) as conn, conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO private_notes (user_id, target_id, note_text) VALUES (?, ?, ?)",
+                        (user_id, str(event.chat_id), note_val)
+                    )
+                await event.edit("📝 یادداشت خصوصی برای این گفتگو ذخیره شد.")
+                return
+
+            if feats.get("f26") and txt == ".notebook":
+                with closing(get_conn()) as conn:
+                    notes = conn.execute("SELECT * FROM private_notes WHERE user_id=?", (user_id,)).fetchall()
+                if not notes:
+                    await event.edit("📒 دفترچه یادداشت سلف دارک خالی است.")
+                else:
+                    lines = ["📒 <b>دفترچه یادداشت خصوصی سلف دارک:</b>"]
+                    for n in notes[:15]:
+                        lines.append(f"• <code>{n['target_id']}</code>: {html.escape(n['note_text'])}")
+                    await event.edit("\n".join(lines), parse_mode="html")
+                return
+
+            # ۹. خلاصه‌سازی پیام طولانی (.sum)
+            if feats.get("f9") and txt == ".sum" and event.is_reply:
+                rep = await event.get_reply_message()
+                if rep and rep.raw_text:
+                    words = rep.raw_text.split()
+                    summary = " ".join(words[:35]) + ("..." if len(words) > 35 else "")
+                    await event.edit(f"📝 <b>خلاصه پیام ({len(words)} کلمه):</b>\n{html.escape(summary)}", parse_mode="html")
+                return
+
+            # ۷. ترجمه سریع (.tr)
+            if feats.get("f7") and txt.startswith(".tr") and event.is_reply:
+                rep = await event.get_reply_message()
+                if rep and rep.raw_text:
+                    try:
+                        r = requests.get(
+                            "https://translate.googleapis.com/translate_a/single",
+                            params={"client": "gtx", "sl": "auto", "tl": "fa", "dt": "t", "q": rep.raw_text[:500]},
+                            timeout=8
+                        ).json()
+                        tr_text = "".join([part[0] for part in r[0] if part[0]])
+                        await event.edit(f"🌐 <b>ترجمه سلف دارک:</b>\n{html.escape(tr_text)}", parse_mode="html")
+                    except Exception:
+                        await event.edit("⚠️ خطا در ارتباط با سرویس ترجمه.")
+                return
+
+            # ۲۵. ساخت دستورات شخصی
+            if feats.get("f25"):
+                custom_rule = feats.get("custom_cmd", "")
+                if "=" in custom_rule:
+                    k_cmd, v_resp = custom_rule.split("=", 1)
+                    if txt == k_cmd.strip():
+                        await event.edit(v_resp.strip())
+                        return
+
+            # ۲۱. پاسخ با سبک دلخواه (بولد/ایتالیک/مونو خودکار روی پیام‌های خروجی عادی)
+            if feats.get("f21") and not txt.startswith(".") and len(txt) < 300:
+                style_mode = feats.get("text_style", "bold")
+                try:
+                    if style_mode == "bold":
+                        await event.edit(f"<b>{html.escape(txt)}</b>", parse_mode="html")
+                    elif style_mode == "italic":
+                        await event.edit(f"<i>{html.escape(txt)}</i>", parse_mode="html")
+                    elif style_mode == "mono":
+                        await event.edit(f"<code>{html.escape(txt)}</code>", parse_mode="html")
+                except Exception:
+                    pass
+
+        # پردازش پیام‌های ورودی از دیگران (Incoming Messages)
+        if not event.out:
+            # ۱۷. سنجاق خودکار پیام‌های مهم
+            if feats.get("f17") and event.raw_text and ("مهم" in event.raw_text or "#مهم" in event.raw_text):
+                try:
+                    await event.pin()
+                except Exception:
+                    pass
+
+            # ۲۴. پیشنهاد هوشمند شکلک / ری‌اکشن خودکار
+            if feats.get("f24") and event.is_private:
+                emj = feats.get("auto_react_emoji", "🔥")
+                try:
+                    await client(functions.messages.SendReactionRequest(
+                        peer=event.chat_id,
+                        msg_id=event.id,
+                        reaction=[types.ReactionEmoji(emoticon=emj)]
+                    ))
+                except Exception:
+                    pass
+
+            # ۳۴. ضد لینک پیوی
+            if feats.get("f34") and event.is_private and event.raw_text:
+                if "t.me/" in event.raw_text or "http://" in event.raw_text or "https://" in event.raw_text:
+                    try:
+                        await event.delete()
+                        return
+                    except Exception:
+                        pass
+
+            # ۳۹. شکارچی تگ و منشن در گروه
+            if feats.get("f39") and event.is_group and event.mentioned:
+                try:
+                    chat = await event.get_chat()
+                    gtitle = getattr(chat, "title", "گروه")
+                    await client.send_message(
+                        "me",
+                        f"🔔 <b>شکارچی منشن سلف دارک:</b>\nدر گروه <b>{html.escape(gtitle)}</b> به شما اشاره شد:\n\n{html.escape(event.raw_text or 'مدیا')}",
+                        parse_mode="html"
+                    )
+                except Exception:
+                    pass
+
+            # ۱. پاسخگویی خودکار هوشمند در پیوی
+            if feats.get("f1") and event.is_private:
+                reply_txt = feats.get("autoreply_text", "سلام، در حال حاضر آنلاین نیستم. 🌑")
+                try:
+                    await event.reply(reply_txt)
+                except Exception:
+                    pass
+
+            # ۳۲. اکشن تایپینگ خودکار
+            if feats.get("f32") and event.is_private:
+                act = feats.get("chat_action", "typing")
+                try:
+                    async with client.action(event.chat_id, act):
+                        await asyncio.sleep(2)
+                except Exception:
+                    pass
+
+    # ۱۲. ذخیره تاریخچه ویرایش پیام‌ها (Anti-Edit)
+    @client.on(events.MessageEdited)
+    async def on_message_edited(event):
+        if event.out:
+            return
+        feats = get_user_features(user_id)
+        if not feats.get("f12"):
+            return
+        with closing(get_conn()) as conn:
+            old = conn.execute(
+                "SELECT * FROM edited_cache WHERE user_id=? AND chat_id=? AND msg_id=?",
+                (user_id, event.chat_id, event.id)
+            ).fetchone()
+        if old and event.raw_text and old["text_content"] != event.raw_text:
+            try:
+                await client.send_message(
+                    "me",
+                    f"✏️ <b>تشخیص ویرایش پیام (سلف دارک)</b>\n"
+                    f"👤 فرستنده: <b>{html.escape(old['sender_name'])}</b>\n"
+                    f"🔴 متن قبلی:\n<code>{html.escape(old['text_content'])}</code>\n\n"
+                    f"🟢 متن جدید:\n<code>{html.escape(event.raw_text)}</code>",
+                    parse_mode="html"
+                )
+            except Exception:
+                pass
+
+    # ۱۱. ذخیره پیام‌های حذف‌شده (Anti-Delete)
+    @client.on(events.MessageDeleted)
+    async def on_message_deleted(event):
+        feats = get_user_features(user_id)
+        if not feats.get("f11"):
+            return
+        for mid in event.deleted_ids:
+            with closing(get_conn()) as conn:
+                old = conn.execute(
+                    "SELECT * FROM edited_cache WHERE user_id=? AND msg_id=?",
+                    (user_id, mid)
+                ).fetchone()
+            if old:
+                try:
+                    await client.send_message(
+                        "me",
+                        f"🗑 <b>شکار پیام حذف‌شده (سلف دارک)</b>\n"
+                        f"👤 فرستنده: <b>{html.escape(old['sender_name'])}</b>\n"
+                        f"📝 متن پیام حذف‌شده:\n<code>{html.escape(old['text_content'])}</code>",
+                        parse_mode="html"
+                    )
+                except Exception:
+                    pass
+
+async def start_single_self_client(user_id: int, session_str: str) -> bool:
+    if user_id in ACTIVE_SELF_CLIENTS:
+        try:
+            await ACTIVE_SELF_CLIENTS[user_id].disconnect()
+        except Exception:
+            pass
+        ACTIVE_SELF_CLIENTS.pop(user_id, None)
+
+    try:
+        client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        await client.connect()
+        if not await client.is_user_authorized():
+            logger.warning(f"سشن کاربر {user_id} دیگر معتبر نیست.")
+            with closing(get_conn()) as conn, conn:
+                conn.execute("UPDATE self_accounts SET is_running=0 WHERE user_id=?", (user_id,))
+            return False
+
+        await setup_telethon_handlers(user_id, client)
+        ACTIVE_SELF_CLIENTS[user_id] = client
+        logger.info(f"🌑 سلف دارک برای کاربر {user_id} با موفقیت روشن شد.")
+        return True
+    except Exception as e:
+        logger.error(f"خطا در راه‌اندازی کلاینت سلف دارک {user_id}: {e}")
+        return False
+
+async def stop_single_self_client(user_id: int):
+    client = ACTIVE_SELF_CLIENTS.pop(user_id, None)
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE self_accounts SET is_running=0 WHERE user_id=?", (user_id,))
+
+# ====================================================================
+#  تسک‌های پس‌زمینه: ۱. کسر ساعتی ۳ الماس | ۲. تغییر ساعت بیو/نام | ۳. ارسال خودکار تبچی
+# ====================================================================
+
+async def hourly_diamond_billing_job(context: ContextTypes.DEFAULT_TYPE):
+    """هر دقیقه چک می‌کند و به ازای هر ۱ ساعت روشن بودن سلف دارک، ۳ الماس از حساب کاربر کسر می‌کند"""
+    hourly_cost = int(get_setting("hourly_cost", "3"))
+    now = datetime.now()
+
+    with closing(get_conn()) as conn:
+        running_accs = conn.execute("SELECT * FROM self_accounts WHERE is_running=1").fetchall()
+
+    for acc in running_accs:
+        uid = acc["user_id"]
+        if is_admin(uid):
+            continue
+        try:
+            last_charge = datetime.fromisoformat(acc["last_hourly_charge"])
+        except Exception:
+            last_charge = now - timedelta(hours=1)
+
+        if (now - last_charge) >= timedelta(hours=1):
+            with closing(get_conn()) as conn, conn:
+                u = conn.execute("SELECT diamonds FROM users WHERE user_id=?", (uid,)).fetchone()
+                current_d = u["diamonds"] if u else 0
+
+                if current_d >= hourly_cost:
+                    conn.execute(
+                        "UPDATE users SET diamonds = diamonds - ?, total_spent_diamonds = total_spent_diamonds + ? WHERE user_id=?",
+                        (hourly_cost, hourly_cost, uid)
+                    )
+                    conn.execute(
+                        "UPDATE self_accounts SET last_hourly_charge=? WHERE user_id=?",
+                        (now.isoformat(), uid)
+                    )
+                else:
+                    # خاموش کردن خودکار سلف در صورت اتمام الماس
+                    await stop_single_self_client(uid)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=uid,
+                            text=p_text(
+                                f"⚠️ <b>سلف دارک شما به دلیل اتمام موجودی الماس متوقف شد!</b>\n\n"
+                                f"💎 هزینه روشن بودن سلف ساعتی <b>{hourly_cost} الماس</b> است و موجودی شما به پایان رسید.\n"
+                                f"👇 جهت روشن شدن مجدد سلف دارک، حساب خود را شارژ کنید:"
+                            ),
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup([
+                                [p_btn("خرید الماس (TON / کارت به کارت)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem")],
+                                [p_btn("دریافت الماس رایگان (زیرمجموعه)", callback_data="menu:referral", style="primary", emoji_key="gift")]
+                            ])
+                        )
+                    except Exception:
+                        pass
+
+async def profile_and_tabchi_worker_job(context: ContextTypes.DEFAULT_TYPE):
+    """اجرای زمان‌بندی تغییر بیوگرافی/نام اکانت و ارسال خودکار بنرهای تبچی هوشمند"""
+    now = datetime.now()
+    time_str = now.strftime("%H:%M")
+
+    for uid, client in list(ACTIVE_SELF_CLIENTS.items()):
+        feats = get_user_features(uid)
+
+        # ۳. تغییر خودکار بیوگرافی و ۶. آنلاین دائمی
+        try:
+            if feats.get("f6"):
+                await client(functions.account.UpdateStatusRequest(offline=False))
+            if feats.get("f3"):
+                bio_tpl = feats.get("bio_template", "🌑 Self Dark | ⏰ {time}")
+                new_bio = bio_tpl.replace("{time}", time_str)[:70]
+                await client(functions.account.UpdateProfileRequest(about=new_bio))
+        except Exception:
+            pass
+
+        # اجرای تبچی هوشمند برای گروه‌های ثبت شده کاربر
+        if get_setting("tabchi_global_enabled", "1") == "1" and feats.get("tabchi_enabled", True):
+            with closing(get_conn()) as conn:
+                groups = conn.execute(
+                    "SELECT * FROM tabchi_groups WHERE user_id=? AND is_active=1",
+                    (uid,)
+                ).fetchall()
+
+            for grp in groups:
+                interval_m = max(1, grp["interval_minutes"])
+                should_send = False
+                if not grp["last_sent_at"]:
+                    should_send = True
+                else:
+                    try:
+                        last_dt = datetime.fromisoformat(grp["last_sent_at"])
+                        if (now - last_dt) >= timedelta(minutes=interval_m):
+                            should_send = True
+                    except Exception:
+                        should_send = True
+
+                if should_send:
+                    try:
+                        await client.send_message(grp["chat_id"], grp["banner_text"])
+                        with closing(get_conn()) as conn, conn:
+                            conn.execute(
+                                "UPDATE tabchi_groups SET last_sent_at=? WHERE id=?",
+                                (now.isoformat(), grp["id"])
+                            )
+                        await asyncio.sleep(max(1, grp["delay_seconds"]))
+                    except Exception as e:
+                        logger.warning(f"خطا در ارسال تبچی به گروه {grp['chat_id']}: {e}")
+
+# ====================================================================
+#  کیبوردهای تمام‌شیشه‌ای و رنگی سلف دارک (با تم غالب آبی Primary)
 # ====================================================================
 
 def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    acc = get_self_account(user_id)
+    self_status = "🟢 فعال" if (acc and acc["is_running"] == 1) else "🔴 غیرفعال"
     rows = [
         [
-            p_btn("ساخت دکمه شیشه‌ای رنگی", callback_data="menu:create_btn", style="primary", emoji_key="sparkles"),
+            p_btn(f"فعالسازی و اتصال سلف دارک ({self_status})", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
         ],
         [
-            p_btn("ایموجی پریمیوم در کانال (VIP)", callback_data="menu:premium_emoji", style="primary", emoji_key="fire"),
+            p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
+            p_btn("تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
         ],
         [
-            p_btn("خرید اشتراک VIP", callback_data="menu:buy_vip", style="success", emoji_key="gem"),
-            p_btn("زیرمجموعه‌گیری (VIP رایگان)", callback_data="menu:referral", style="primary", emoji_key="gift"),
+            p_btn("خرید الماس (TON / ریالی)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+            p_btn("زیرمجموعه‌گیری (۵ الماس رایگان)", callback_data="menu:referral", style="primary", emoji_key="gift"),
         ],
         [
-            p_btn("حساب کاربری و وضعیت من", callback_data="menu:profile", style="primary", emoji_key="star"),
-            p_btn("راهنما و مقایسه پلن‌ها", callback_data="menu:help", style="primary", emoji_key="zap"),
+            p_btn("حساب کاربری من", callback_data="menu:profile", style="primary", emoji_key="star"),
+            p_btn("راهنمای کامل سلف دارک", callback_data="menu:help", style="primary", emoji_key="zap"),
+        ],
+        [
+            p_btn("هدیه روزانه و کد هدیه", callback_data="menu:daily_gift", style="success", emoji_key="party"),
         ],
     ]
     if is_admin(user_id):
         rows.append([
-            p_btn("پنل مدیریت پیشرفته (۲۰ قابلیت)", callback_data="admin:home", style="danger", emoji_key="crown")
+            p_btn("پنل مدیریت سلف دارک (۴۰ قابلیت)", callback_data="admin:page:0", style="danger", emoji_key="crown")
         ])
     return InlineKeyboardMarkup(rows)
 
-def admin_inline_keyboard() -> InlineKeyboardMarkup:
-    """پنل مدیریت ۲۰ قابلیته با دکمه‌های شیشه‌ای رنگی و ایموجی‌های پریمیوم متحرک"""
-    bot_status_str = "روشن" if get_setting("bot_active", "1") == "1" else "خاموش"
-    rows = [
-        [
-            p_btn("۱. آمار کامل ربات", callback_data="adm:stats", style="primary", emoji_key="zap"),
-            p_btn("۲. پیام همگانی", callback_data="adm:broadcast", style="primary", emoji_key="megaphone"),
-        ],
-        [
-            p_btn("۳. فوروارد همگانی", callback_data="adm:fwbroadcast", style="primary", emoji_key="rocket"),
-            p_btn("۴. تنظیم شماره کارت", callback_data="adm:set_card", style="success", emoji_key="money"),
-        ],
-        [
-            p_btn("۵. تنظیم نام صاحب کارت", callback_data="adm:set_holder", style="primary", emoji_key="star"),
-            p_btn("۶. قیمت VIP یک‌ماهه", callback_data="adm:price_30", style="success", emoji_key="gem"),
-        ],
-        [
-            p_btn("۷. قیمت VIP سه‌ماهه", callback_data="adm:price_90", style="success", emoji_key="crown"),
-            p_btn("۸. رسیدهای در انتظار تایید", callback_data="adm:pending_pays", style="primary", emoji_key="check"),
-        ],
-        [
-            p_btn("۹. افزودن کانال جوین اجباری", callback_data="adm:add_fch", style="success", emoji_key="sparkles"),
-            p_btn("۱۰. حذف کانال جوین اجباری", callback_data="adm:del_fch", style="danger", emoji_key="fire"),
-        ],
-        [
-            p_btn("۱۱. لیست کانال‌های اجباری", callback_data="adm:list_fch", style="primary", emoji_key="megaphone"),
-            p_btn("۱۲. اهدای اشتراک VIP", callback_data="adm:gift_vip", style="success", emoji_key="gift"),
-        ],
-        [
-            p_btn("۱۳. لغو اشتراک VIP کاربر", callback_data="adm:revoke_vip", style="danger", emoji_key="fire"),
-            p_btn("۱۴. جستجو و اطلاعات کاربر", callback_data="adm:user_info", style="primary", emoji_key="star"),
-        ],
-        [
-            p_btn("۱۵. مسدود/آزادسازی کاربر", callback_data="adm:ban_toggle", style="danger", emoji_key="fire"),
-            p_btn("۱۶. سقف روزانه رایگان", callback_data="adm:set_limit", style="primary", emoji_key="hundred"),
-        ],
-        [
-            p_btn("۱۷. روزهای بدون تبلیغ اولیه", callback_data="adm:set_noads", style="primary", emoji_key="glow"),
-            p_btn("۱۸. تنظیمات پاداش رفرال", callback_data="adm:set_ref", style="primary", emoji_key="gift"),
-        ],
-        [
-            p_btn("۱۹. متن تبلیغ زیر پست", callback_data="adm:set_adsig", style="primary", emoji_key="sparkles"),
-            p_btn(f"۲۰. وضعیت ربات ({bot_status_str})", callback_data="adm:toggle_bot", style="danger", emoji_key="zap"),
-        ],
-        [
-            p_btn("بازگشت به منوی اصلی ربات", callback_data="menu:main", style="primary", emoji_key="glow"),
-        ]
-    ]
+def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    """صفحه‌بندی ۴۰ قابلیت سلف دارک (هر صفحه ۱۰ قابلیت با دکمه‌های آبی، سبز و قرمز)"""
+    feats = get_user_features(user_id)
+    keys = list(SELF_DARK_FEATURES.keys())
+    per_page = 10
+    total_pages = (len(keys) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    slice_keys = keys[page * per_page : (page + 1) * per_page]
+
+    rows = []
+    for k in slice_keys:
+        meta = SELF_DARK_FEATURES[k]
+        is_on = feats.get(k, False)
+        status_str = "🟢 روشن" if is_on else "🔴 خاموش"
+        btn_style = "success" if is_on else "primary"
+        row = [p_btn(f"{meta['title']} ({status_str})", callback_data=f"ftoggle:{k}:{page}", style=btn_style)]
+        if "val_key" in meta:
+            row.append(p_btn("⚙️ تنظیم مقدار", callback_data=f"fsetval:{k}:{page}", style="primary"))
+        rows.append(row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(p_btn("⬅️ صفحه قبل", callback_data=f"self:features_page:{page - 1}", style="primary"))
+    nav_row.append(p_btn(f"صفحه {page + 1} از {total_pages}", callback_data="noop", style="primary"))
+    if page < total_pages - 1:
+        nav_row.append(p_btn("صفحه بعد ➡️", callback_data=f"self:features_page:{page + 1}", style="primary"))
+    rows.append(nav_row)
+
+    rows.append([
+        p_btn("روشن کردن همه قابلیت‌ها", callback_data=f"fbulk:on:{page}", style="success", emoji_key="check"),
+        p_btn("خاموش کردن همه", callback_data=f"fbulk:off:{page}", style="danger", emoji_key="fire"),
+    ])
+    rows.append([p_btn("بازگشت به منوی اصلی سلف دارک", callback_data="menu:main", style="danger", emoji_key="glow")])
+    return InlineKeyboardMarkup(rows)
+
+# ====================================================================
+#  پنل مدیریت ۴۰ قابلیته سلف دارک (مخصوص آیدی عددی 8248647747)
+# ====================================================================
+
+ADMIN_40_ITEMS = [
+    ("adm:1",  "۱. آمار جامع سلف دارک", "primary"),
+    ("adm:2",  "۲. پیام همگانی به کاربران", "primary"),
+    ("adm:3",  "۳. فوروارد همگانی", "primary"),
+    ("adm:4",  "۴. شناسایی کاربر با فوروارد پیام", "success"),
+    ("adm:5",  "۵. افزایش الماس کاربر با آیدی", "success"),
+    ("adm:6",  "۶. کسر الماس کاربر با آیدی", "danger"),
+    ("adm:7",  "۷. تنظیم آدرس ولت TON", "primary"),
+    ("adm:8",  "۸. تنظیم قیمت هر الماس به TON", "primary"),
+    ("adm:9",  "۹. تنظیم حداقل خرید الماس", "primary"),
+    ("adm:10", "۱۰. سفارشات TON در انتظار تایید", "success"),
+    ("adm:11", "۱۱. تنظیم آیدی پشتیبانی ریالی", "primary"),
+    ("adm:12", "۱۲. روشن/خاموش کردن زیرمجموعه‌گیری", "primary"),
+    ("adm:13", "۱۳. تغییر پاداش الماس هر زیرمجموعه", "success"),
+    ("adm:14", "۱۴. افزودن کانال جوین اجباری", "success"),
+    ("adm:15", "۱۵. حذف کانال جوین اجباری", "danger"),
+    ("adm:16", "۱۶. لیست کانال‌های جوین اجباری", "primary"),
+    ("adm:17", "۱۷. تغییر هزینه فعال‌سازی سلف (۳۰ الماس)", "primary"),
+    ("adm:18", "۱۸. تغییر هزینه ساعتی سلف (۳ الماس)", "primary"),
+    ("adm:19", "۱۹. لیست اکانت‌های سلف روشن", "primary"),
+    ("adm:20", "۲۰. قطع و توقف سلف کاربر", "danger"),
+    ("adm:21", "۲۱. راه‌اندازی مجدد همه سلف‌ها", "success"),
+    ("adm:22", "۲۲. مسدود کردن کاربر (Ban)", "danger"),
+    ("adm:23", "۲۳. رفع مسدودیت کاربر (Unban)", "success"),
+    ("adm:24", "۲۴. هدیه الماس همگانی به همه", "success"),
+    ("adm:25", "۲۵. ساخت کد هدیه الماس", "success"),
+    ("adm:26", "۲۶. حذف کدهای هدیه", "danger"),
+    ("adm:27", "۲۷. لیست کدهای هدیه فعال", "primary"),
+    ("adm:28", "۲۸. تنظیم الماس خوش‌آمدگویی", "primary"),
+    ("adm:29", "۲۹. تنظیم الماس هدیه روزانه", "primary"),
+    ("adm:30", "۳۰. لیست برترین زیرمجموعه‌گیرها", "primary"),
+    ("adm:31", "۳۱. لیست ثروتمندترین کاربران (الماس)", "primary"),
+    ("adm:32", "۳۲. لیست کل گروه‌های تبچی ثبت‌شده", "primary"),
+    ("adm:33", "۳۳. روشن/خاموش کردن سراسری تبچی", "danger"),
+    ("adm:34", "۳۴. ارسال پیام مستقیم به پیوی کاربر", "primary"),
+    ("adm:35", "۳۵. تنظیم متن تکمیلی راهنما", "primary"),
+    ("adm:36", "۳۶. روشن/خاموش کردن ثبت سلف جدید", "danger"),
+    ("adm:37", "۳۷. پاکسازی کش پیام‌های حذف/ویرایش", "danger"),
+    ("adm:38", "۳۸. دریافت فایل بکاپ دیتابیس (.db)", "success"),
+    ("adm:39", "۳۹. وضعیت سلامت سرور و پینگر Render", "primary"),
+    ("adm:40", "۴۰. روشن/خاموش کردن کل ربات", "danger"),
+]
+
+def build_admin_keyboard(page: int = 0) -> InlineKeyboardMarkup:
+    per_page = 10
+    total_pages = (len(ADMIN_40_ITEMS) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    items = ADMIN_40_ITEMS[page * per_page : (page + 1) * per_page]
+
+    rows = []
+    for i in range(0, len(items), 2):
+        row = [p_btn(items[i][1], callback_data=items[i][0], style=items[i][2])]
+        if i + 1 < len(items):
+            row.append(p_btn(items[i + 1][1], callback_data=items[i + 1][0], style=items[i + 1][2]))
+        rows.append(row)
+
+    nav = []
+    if page > 0:
+        nav.append(p_btn("⬅️ صفحه قبل", callback_data=f"admin:page:{page - 1}", style="primary"))
+    nav.append(p_btn(f"صفحه {page + 1} از {total_pages}", callback_data="noop", style="primary"))
+    if page < total_pages - 1:
+        nav.append(p_btn("صفحه بعد ➡️", callback_data=f"admin:page:{page + 1}", style="primary"))
+    rows.append(nav)
+    rows.append([p_btn("بازگشت به منوی اصلی سلف دارک", callback_data="menu:main", style="danger", emoji_key="glow")])
     return InlineKeyboardMarkup(rows)
 
 def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
@@ -621,89 +1102,25 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
 #  وضعیت‌های ConversationHandler
 # ====================================================================
 (
-    BTN_WAIT_POST,
-    BTN_WAIT_URL,
-    BTN_WAIT_TEXT,
-    BTN_WAIT_COLOR,
-    BTN_WAIT_CHANNEL,
-    BTN_WAIT_CONFIRM,
-    EMOJI_WAIT_POST,
-    EMOJI_WAIT_CHANNEL,
-    EMOJI_WAIT_CONFIRM,
-    PAY_WAIT_RECEIPT,
-    ADM_WAIT_INPUT,
+    SELF_WAIT_PHONE,
+    SELF_WAIT_CODE,
+    SELF_WAIT_2FA,
+    FEAT_WAIT_VAL,
+    TABCHI_WAIT_BANNER,
+    TABCHI_WAIT_INTERVAL,
+    TABCHI_WAIT_DELAY,
+    BUY_WAIT_DIAMOND_COUNT,
+    GIFT_WAIT_CODE,
+    ADM_WAIT_GENERIC,
+    ADM_WAIT_FORWARD_USER,
+    ADM_WAIT_FORWARD_AMOUNT,
     ADM_WAIT_FCH_ID,
     ADM_WAIT_FCH_LINK,
     ADM_WAIT_FCH_TITLE,
-    ADM_WAIT_GIFT_UID,
-    ADM_WAIT_GIFT_DAYS,
-) = range(16)
+) = range(15)
 
 # ====================================================================
-#  کمکی ارسال پست (متن یا مدیا) به کانال یا چت
-# ====================================================================
-
-async def send_stored_post(bot, chat_id, post_data: dict, reply_markup=None, custom_text: str = None):
-    ptype = post_data.get("type", "text")
-    caption_or_text = custom_text if custom_text is not None else post_data.get("text", "")
-    file_id = post_data.get("file_id")
-
-    if ptype == "text":
-        return await bot.send_message(
-            chat_id=chat_id,
-            text=caption_or_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-            disable_web_page_preview=False
-        )
-    elif ptype == "photo":
-        return await bot.send_photo(
-            chat_id=chat_id,
-            photo=file_id,
-            caption=caption_or_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-    elif ptype == "video":
-        return await bot.send_video(
-            chat_id=chat_id,
-            video=file_id,
-            caption=caption_or_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-    elif ptype == "animation":
-        return await bot.send_animation(
-            chat_id=chat_id,
-            animation=file_id,
-            caption=caption_or_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-    elif ptype == "document":
-        return await bot.send_document(
-            chat_id=chat_id,
-            document=file_id,
-            caption=caption_or_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-
-def normalize_channel_identifier(raw_input: str) -> str:
-    txt = raw_input.strip()
-    if txt.startswith("-100") and txt[1:].isdigit():
-        return txt
-    m = re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]{4,})", txt)
-    if m:
-        username = m.group(1)
-        if not username.startswith("+") and username.lower() != "joinchat":
-            return f"@{username}"
-    if not txt.startswith("@") and re.match(r"^[a-zA-Z0-9_]{4,}$", txt):
-        return f"@{txt}"
-    return txt
-
-# ====================================================================
-#  هندلر شروع (/start) و بررسی جوین اجباری
+#  هندلر شروع (/start) و منوهای اصلی سلف دارک
 # ====================================================================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -719,55 +1136,51 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_user = get_or_create_user(user.id, user.username, user.first_name, invited_by)
     if db_user["is_banned"] == 1 and not is_admin(user.id):
-        await update.message.reply_text(p_text("🚫 حساب کاربری شما توسط مدیریت مسدود شده است."), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(p_text("🚫 حساب شما در ربات سلف دارک مسدود شده است."), parse_mode=ParseMode.HTML)
         return
 
     if get_setting("bot_active", "1") == "0" and not is_admin(user.id):
-        await update.message.reply_text(p_text("⏳ ربات موقتاً در حال بروزرسانی است. لطفاً کمی بعد مراجعه کنید."), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(p_text("⏳ ربات سلف دارک موقتاً در حال بروزرسانی است."), parse_mode=ParseMode.HTML)
         return
 
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
         await update.message.reply_text(
-            p_text("👋 سلام! برای استفاده از امکانات ربات و ثبت زیرمجموعه، ابتدا در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ عضو شدم»</b> را بزنید:"),
+            p_text("👋 سلام! برای ورود به ربات <b>سلف دارک (Self Dark)</b> و ثبت زیرمجموعه، ابتدا در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ عضو شدم»</b> را بزنید:"),
             parse_mode=ParseMode.HTML,
             reply_markup=build_force_join_keyboard(not_joined)
         )
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    acc = get_self_account(user.id)
+    self_state = "🟢 روشن و متصل" if (acc and acc["is_running"] == 1) else "🔴 خاموش / متصل نشده"
 
-    vip_badge = "💎 اشتراک VIP فعال" if is_user_vip(user.id) else "🔹 اشتراک معمولی"
-    welcome_text = p_text(
-        f"🌟 <b>سلام {html.escape(user.first_name)} عزیز، به ربات سازنده دکمه شیشه‌ای رنگی خوش آمدی!</b>\n\n"
-        f"📊 وضعیت حساب شما: <b>{vip_badge}</b>\n\n"
-        f"🎨 با این ربات می‌تونی برای پست‌های متنی، عکس، ویدیو یا فایل خودت <b>دکمه‌های شیشه‌ای رنگی (آبی، سبز، قرمز و معمولی)</b> بسازی و مستقیم داخل کانالت پست کنی! 🚀\n\n"
-        f"✨ از دکمه‌های شیشه‌ای زیر بخش مورد نظرت رو انتخاب کن:"
+    welcome = p_text(
+        f"🌑 <b>به ربات هوشمند «سلف دارک | Self Dark» خوش آمدید!</b>\n\n"
+        f"👤 کاربر: <b>{html.escape(user.first_name)}</b>\n"
+        f"💎 موجودی الماس شما: <b>{db_user['diamonds']} الماس</b>\n"
+        f"⚡ وضعیت سلف دارک: <b>{self_state}</b>\n\n"
+        f"🚀 با <b>سلف دارک</b>، اکانت تلگرام خود را به ۴۰ قابلیت پیشرفته (ضد حذف، ضد ویرایش، ساعت زنده، منشی هوشمند، هوش مصنوعی و...) و <b>تبچی هوشمند گروهی</b> مجهز کنید!\n\n"
+        f"✨ از دکمه‌های شیشه‌ای رنگی زیر بخش مورد نظر خود را انتخاب کنید:"
     )
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_inline_keyboard(user.id)
-    )
+    await update.message.reply_text(welcome, parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
-        await query.answer("⚠️ شما هنوز در تمام کانال‌ها عضو نشده‌اید!", show_alert=True)
+        await query.answer("⚠️ هنوز در تمام کانال‌ها عضو نشده‌اید!", show_alert=True)
         return
-    await query.answer("✅ عضویت شما با موفقیت تایید شد!")
+    await query.answer("✅ عضویت شما تایید شد!")
     await verify_referral_if_eligible(context.bot, user.id)
     await query.edit_message_text(
-        p_text(f"✅ <b>عضویت شما تایید شد!</b>\n🎉 خوش آمدید {html.escape(user.first_name)} عزیز.\n✨ از منوی شیشه‌ای زیر انتخاب کنید:"),
+        p_text(f"✅ <b>عضویت شما تایید شد!</b>\n🌑 به ربات <b>سلف دارک</b> خوش آمدید:"),
         parse_mode=ParseMode.HTML,
         reply_markup=main_inline_keyboard(user.id)
     )
-
-# ====================================================================
-#  منوهای عمومی (حساب کاربری، خرید اشتراک، زیرمجموعه‌گیری، راهنما)
-# ====================================================================
 
 async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -776,7 +1189,7 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     db_user = get_or_create_user(user.id, user.username, user.first_name)
     if db_user["is_banned"] == 1 and not is_admin(user.id):
-        await query.answer("🚫 شما مسدود هستید.", show_alert=True)
+        await query.answer("🚫 حساب شما مسدود است.", show_alert=True)
         return
 
     not_joined = await check_user_joined_all(context.bot, user.id)
@@ -793,850 +1206,1442 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     if data == "menu:main":
-        context.user_data.clear()
-        vip_badge = "💎 اشتراک VIP فعال" if is_user_vip(user.id) else "🔹 اشتراک معمولی"
+        acc = get_self_account(user.id)
+        self_state = "🟢 روشن و متصل" if (acc and acc["is_running"] == 1) else "🔴 خاموش / متصل نشده"
         await query.edit_message_text(
             p_text(
-                f"🏠 <b>منوی اصلی ربات دکمه شیشه‌ای رنگی</b>\n\n"
+                f"🌑 <b>منوی اصلی ربات سلف دارک (Self Dark)</b>\n\n"
                 f"👤 کاربر: <b>{html.escape(user.first_name)}</b>\n"
-                f"📊 نوع حساب: <b>{vip_badge}</b>\n\n"
-                f"✨ یکی از گزینه‌های زیر را انتخاب کنید:"
+                f"💎 موجودی الماس: <b>{db_user['diamonds']} الماس</b>\n"
+                f"⚡ وضعیت سلف دارک: <b>{self_state}</b>\n\n"
+                f"✨ بخش مورد نظر را انتخاب کنید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
 
     elif data == "menu:profile":
-        daily_used = check_and_Reset_daily_usage(user.id)
-        limit = get_setting("free_daily_limit", "3")
-        vip_status = get_vip_remaining_text(user.id)
-        ad_state = "بدون تبلیغ ✅" if not should_append_bot_ad(user.id) else "دارای آیدی ربات زیر پست (گذشت ۳ روز اول)"
-        daily_str = f"{daily_used} از نامحدود (VIP)" if is_user_vip(user.id) else f"{daily_used} از {limit} دکمه"
+        acc = get_self_account(user.id)
+        with closing(get_conn()) as conn:
+            t_groups = conn.execute("SELECT COUNT(*) c FROM tabchi_groups WHERE user_id=?", (user.id,)).fetchone()["c"]
+        act_cost = get_setting("activation_cost", "30")
+        hr_cost = get_setting("hourly_cost", "3")
+        phone_str = acc["phone"] if acc else "ثبت نشده"
+        self_st = "🟢 فعال و روشن" if (acc and acc["is_running"] == 1) else "🔴 غیرفعال"
 
         text = p_text(
-            f"👤 <b>اطلاعات حساب کاربری شما</b>\n\n"
-            f"⚡ آیدی عددی: <code>{user.id}</code>\n"
-            f"💎 وضعیت اشتراک: <b>{vip_status}</b>\n"
-            f"📊 مصرف امروز: <b>{daily_str}</b>\n"
-            f"✨ کل پست‌های ساخته شده: <b>{db_user['total_posts']} پست</b>\n"
-            f"👥 زیرمجموعه‌های تاییدشده: <b>{db_user['referrals_count']} نفر</b>\n"
-            f"📣 وضعیت تبلیغ زیر پست: <b>{ad_state}</b>"
+            f"👤 <b>حساب کاربری شما در سلف دارک</b>\n\n"
+            f"🔢 آیدی عددی: <code>{user.id}</code>\n"
+            f" نام: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
+            f"💎 موجودی فعلی الماس: <b>{db_user['diamonds']} الماس</b>\n"
+            f"🔥 کل الماس مصرف‌شده: <b>{db_user['total_spent_diamonds']} الماس</b>\n"
+            f"👥 زیرمجموعه‌های تاییدشده: <b>{db_user['referrals_count']} نفر</b>\n\n"
+            f"🌑 <b>وضعیت سلف دارک:</b> <b>{self_st}</b>\n"
+            f"📱 شماره متصل: <code>{phone_str}</code>\n"
+            f"📣 گروه‌های ثبت‌شده در تبچی: <b>{t_groups} گروه</b>\n"
+            f"💰 تعرفه مصرف: <b>{act_cost} الماس فعال‌سازی | ساعتی {hr_cost} الماس</b>"
         )
         kb = InlineKeyboardMarkup([
             [
-                p_btn("ارتقا به اشتراک VIP", callback_data="menu:buy_vip", style="success", emoji_key="gem"),
-                p_btn("دریافت VIP رایگان", callback_data="menu:referral", style="primary", emoji_key="gift"),
+                p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+                p_btn("زیرمجموعه‌گیری رایگان", callback_data="menu:referral", style="primary", emoji_key="gift"),
             ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-    elif data == "menu:buy_vip":
-        p30 = int(get_setting("price_30d", "50000"))
-        p90 = int(get_setting("price_90d", "199000"))
+    elif data == "menu:buy_diamonds":
+        ton_rate = float(get_setting("ton_per_diamond", "0.0005"))
+        min_buy = int(get_setting("min_buy_diamonds", "50"))
         text = p_text(
-            f"💎 <b>خرید اشتراک ویژه (VIP)</b>\n\n"
-            f"✨ <b>مزایای اشتراک VIP نسبت به اشتراک معمولی:</b>\n"
-            f"🔥 ساخت <b>نامحدود</b> دکمه شیشه‌ای در روز (در حالت معمولی فقط ۳ عدد در روز)\n"
-            f"✅ <b>حذف کامل تبلیغ و آیدی ربات</b> از زیر پست‌های کانال شما برای همیشه\n"
-            f"🌟 باز شدن بخش ویژه <b>«✨ استفاده از ایموجی پریمیوم تلگرام در کانال»</b>\n\n"
-            f"💳 <b>تعرفه پلن‌های اشتراک ویژه:</b>\n"
-            f"🔹 اشتراک ۳۰ روزه (یک‌ماهه): <b>{p30:,} تومان</b>\n"
-            f"👑 اشتراک ۹۰ روزه (سه‌ماهه): <b>{p90:,} تومان</b>\n\n"
-            f"🚀 لطفاً پلن مورد نظر خود را برای پرداخت کارت به کارت انتخاب کنید:"
+            f"💎 <b>فروشگاه خرید الماس سلف دارک</b>\n\n"
+            f"⚡ برای فعال‌سازی سلف دارک (<b>{get_setting('activation_cost', '30')} الماس</b>) و روشن ماندن ۲۴ ساعته آن (<b>ساعتی {get_setting('hourly_cost', '3')} الماس</b>) می‌توانید حساب خود را به یکی از ۲ روش زیر شارژ کنید:\n\n"
+            f"1️⃣ <b>پرداخت با ارز دیجیتال TON (تون کوین):</b>\n"
+            f"• قیمت هر ۱ الماس: <b>{ton_rate} TON</b>\n"
+            f"• حداقل میزان خرید: <b>{min_buy} الماس</b> ({min_buy * ton_rate:.4f} TON)\n\n"
+            f"2️⃣ <b>پرداخت ریالی (کارت به کارت):</b>\n"
+            f"• خرید مستقیم از طریق پشتیبانی ریالی\n\n"
+            f"✨ لطفاً روش پرداخت مورد نظر خود را انتخاب کنید:"
         )
         kb = InlineKeyboardMarkup([
-            [p_btn(f"خرید اشتراک ۳۰ روزه ({p30:,} تومان)", callback_data="buyplan:30", style="primary", emoji_key="gem")],
-            [p_btn(f"خرید اشتراک ۳ ماهه ({p90:,} تومان)", callback_data="buyplan:90", style="success", emoji_key="crown")],
-            [p_btn("دریافت VIP رایگان با زیرمجموعه‌گیری", callback_data="menu:referral", style="primary", emoji_key="gift")],
+            [p_btn("خرید با ارز دیجیتال TON (تون)", callback_data="buy:ton", style="primary", emoji_key="gem")],
+            [p_btn("خرید با کارت به کارت (ریالی)", callback_data="buy:rial", style="success", emoji_key="money")],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+    elif data == "buy:rial":
+        sup_id = get_setting("rial_support_id", "@kanfingfreesup")
+        sup_url = f"https://t.me/{sup_id.lstrip('@')}"
+        text = p_text(
+            f"💳 <b>خرید الماس با کارت به کارت (پرداخت ریالی)</b>\n\n"
+            f"✨ برای خرید الماس به صورت ریالی (کارت به کارت)، لطفاً به آیدی پشتیبانی زیر پیام دهید و تعداد الماس مورد نظر و آیدی عددی خود (<code>{user.id}</code>) را اعلام کنید:\n\n"
+            f"👤 <b>آیدی پشتیبانی پرداخت ریالی:</b> {sup_id}"
+        )
+        kb = InlineKeyboardMarkup([
+            [p_btn(f"پیام به پشتیبانی ({sup_id})", url=sup_url, style="success", emoji_key="rocket")],
+            [p_btn("بازگشت به بخش خرید الماس", callback_data="menu:buy_diamonds", style="primary", emoji_key="gem")],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     elif data == "menu:referral":
-        bot_info = await context.bot.get_me()
-        ref_link = f"https://t.me/{bot_info.username}?start=ref_{user.id}"
-        target = int(get_setting("referral_target", "6"))
-        reward_days = int(get_setting("referral_reward_days", "10"))
-        current_refs = db_user["referrals_count"]
-        rewarded = db_user["rewarded_referrals"]
-        progress = current_refs - rewarded
-        rem = max(0, target - progress)
+        ref_enabled = get_setting("referral_enabled", "1") == "1"
+        reward = get_setting("referral_reward", "5")
+        bot_me = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{user.id}"
+        status_txt = "🟢 فعال" if ref_enabled else "🔴 موقتاً غیرفعال توسط مدیریت"
 
         text = p_text(
-            f"🎁 <b>کسب اشتراک VIP رایگان (زیرمجموعه‌گیری)</b>\n\n"
-            f"🔥 با دعوت از دوستان خود به ربات، به ازای هر <b>{target} زیرمجموعه</b> که وارد ربات شده و در کانال‌های جوین اجباری عضو شوند، "
-            f"به‌صورت خودکار <b>{reward_days} روز اشتراک VIP رایگان</b> دریافت می‌کنید!\n\n"
-            f"📊 <b>آمار زیرمجموعه‌های شما:</b>\n"
-            f"👥 کل زیرمجموعه‌های تاییدشده: <b>{current_refs} نفر</b>\n"
-            f"⏳ پیشرفت فعلی برای پاداش بعدی: <b>{progress} از {target} نفر</b> ({rem} نفر دیگر تا فعال‌سازی خودکار {reward_days} روز VIP)\n\n"
-            f"🔗 <b>لینک اختصاصی دعوت شما:</b>\n"
-            f"<code>{ref_link}</code>\n\n"
-            f"✨ <i>توجه: زیرمجموعه زمانی شمارش می‌شود که کاربر جدید روی لینک شما کلیک کرده و در کانال‌های اسپانسر عضو شود.</i>"
+            f"🎁 <b>کسب الماس رایگان (زیرمجموعه‌گیری سلف دارک)</b>\n\n"
+            f"📊 وضعیت بخش زیرمجموعه‌گیری: <b>{status_txt}</b>\n"
+            f"💎 پاداش هر زیرمجموعه: <b>{reward} الماس رایگان</b>\n"
+            f"👥 زیرمجموعه‌های تاییدشده شما: <b>{db_user['referrals_count']} نفر</b>\n\n"
+            f"🔥 با ارسال لینک اختصاصی زیر برای دوستان خود، به ازای هر نفری که وارد ربات شده و در <b>کانال‌های جوین اجباری</b> عضو شود، بلافاصله <b>{reward} الماس</b> دریافت می‌کنید!\n\n"
+            f"🔗 <b>لینک دعوت اختصاصی شما:</b>\n"
+            f"<code>{ref_link}</code>"
         )
         kb = InlineKeyboardMarkup([
-            [p_btn("خرید مستقیم اشتراک VIP", callback_data="menu:buy_vip", style="success", emoji_key="gem")],
+            [p_btn("خرید مستقیم الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem")],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
+    elif data == "menu:daily_gift":
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        daily_amt = int(get_setting("daily_gift_diamonds", "2"))
+        msg_alert = ""
+        if db_user["last_daily_gift"] != today_str:
+            with closing(get_conn()) as conn, conn:
+                conn.execute(
+                    "UPDATE users SET diamonds = diamonds + ?, last_daily_gift = ? WHERE user_id=?",
+                    (daily_amt, today_str, user.id)
+                )
+            msg_alert = f"🎉 تبریک! تعداد <b>{daily_amt} الماس هدیه روزانه</b> به حساب شما اضافه شد!\n\n"
+        else:
+            msg_alert = "⏳ شما هدیه روزانه امروز خود را قبلاً دریافت کرده‌اید. فردا دوباره سر بزنید!\n\n"
+
+        await query.edit_message_text(
+            p_text(
+                f"🎁 <b>بخش هدیه روزانه و کد هدیه سلف دارک</b>\n\n"
+                f"{msg_alert}"
+                f"✨ اگر کد هدیه الماس دارید، روی دکمه زیر کلیک کنید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [p_btn("ثبت کد هدیه الماس", callback_data="enter_gift_code", style="success", emoji_key="gift")],
+                [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+            ])
+        )
+
     elif data == "menu:help":
-        limit = get_setting("free_daily_limit", "3")
-        noads = get_setting("free_no_ads_days", "3")
-        target = get_setting("referral_target", "6")
-        reward = get_setting("referral_reward_days", "10")
-        text = p_text(
-            f"📚 <b>راهنمای کامل ربات و تفاوت اشتراک معمولی و VIP</b>\n\n"
-            f"🔹 <b>اشتراک معمولی (رایگان):</b>\n"
-            f"• هر کاربر تازه وارد، روزانه حداکثر <b>{limit} دکمه شیشه‌ای</b> می‌تواند بسازد.\n"
-            f"• فقط تا <b>{noads} روز اول</b> عضویت، پست‌ها بدون تبلیغ در کانال ارسال می‌شوند.\n"
-            f"• پس از گذشت {noads} روز، هنگام ساخت دکمه شیشه‌ای، آیدی ربات نیز در انتهای متن پست در کانال قرار می‌گیرد.\n\n"
-            f"💎 <b>اشتراک ویژه (VIP):</b>\n"
-            f"• ساخت دکمه شیشه‌ای رنگی به‌صورت <b>کاملاً نامحدود</b> در شبانه‌روز.\n"
-            f"• <b>بدون هیچ‌گونه تبلیغ</b> یا نام ربات در زیر پست‌های شما.\n"
-            f"• دسترسی کامل به بخش <b>«✨ ایموجی پریمیوم تلگرام»</b> برای زیباسازی خودکار پست‌ها.\n\n"
-            f"🎁 <b>روش دریافت VIP رایگان:</b>\n"
-            f"• با آوردن <b>{target} زیرمجموعه</b> (که در کانال‌های اجباری عضو شوند)، اشتراک VIP <b>{reward} روزه</b> رایگان برایتان فعال می‌شود.\n\n"
-            f"⚠️ <b>نکته مهم برای ارسال به کانال:</b>\n"
-            f"• ربات را در کانال خود <b>Admin (مدیر)</b> کنید تا بتواند پست را مستقیماً در کانالتان منتشر کند."
+        act_c = get_setting("activation_cost", "30")
+        hr_c = get_setting("hourly_cost", "3")
+        ref_r = get_setting("referral_reward", "5")
+        ton_r = get_setting("ton_per_diamond", "0.0005")
+        extra_note = get_setting("help_extra_note", "")
+
+        help_text = p_text(
+            f"📚 <b>راهنمای جامع ربات «سلف دارک | Self Dark»</b>\n\n"
+            f"🌑 <b>۱. نحوه فعال‌سازی سلف دارک:</b>\n"
+            f"• ابتدا از داشتن حداقل <b>{act_c} الماس</b> در حساب خود مطمئن شوید.\n"
+            f"• وارد بخش <b>«🚀 فعالسازی و اتصال سلف دارک»</b> شوید.\n"
+            f"• روی دکمه <b>«📱 ارسال شماره تلگرام من»</b> بزنید تا شماره اکانتتان ارسال شود.\n"
+            f"• کد ۵ رقمی تلگرام را با فاصله یا خط تیره (مثلاً <code>1-2-3-4-5</code>) بفرستید تا تلگرام کد را مسدود نکند.\n"
+            f"• اگر رمز دو مرحله‌ای (2FA) دارید، آن را نیز وارد کنید تا سلف دارک بلافاصله روی اکانت شما روشن شود!\n\n"
+            f"💎 <b>۲. سیستم الماس و هزینه‌ها:</b>\n"
+            f"• هزینه فعال‌سازی اولیه سلف دارک: <b>{act_c} الماس</b>\n"
+            f"• هزینه روشن ماندن سلف دارک: <b>ساعتی {hr_c} الماس</b>\n"
+            f"• خرید با ارز دیجیتال TON: هر الماس <b>{ton_r} TON</b> (حداقل ۵۰ الماس)\n"
+            f"• خرید کارت به کارت ریالی: پیام به {get_setting('rial_support_id', '@kanfingfreesup')}\n"
+            f"• زیرمجموعه‌گیری: هر زیرمجموعه که در کانال‌های اجباری عضو شود = <b>{ref_r} الماس رایگان</b>\n\n"
+            f"📣 <b>۳. راهنمای تبچی هوشمند سلف دارک:</b>\n"
+            f"• بعد از روشن شدن سلف دارک، در هر گروهی که می‌خواهید تبچی پیام بفرستد، عبارت <code>تنظیم چت</code> را با اکانت خود ارسال کنید تا گروه ثبت شود.\n"
+            f"• برای حذف گروه، عبارت <code>حذف چت</code> را در گروه بفرستید.\n"
+            f"• از منوی <b>«📣 تبچی هوشمند سلف دارک»</b> در همین ربات می‌توانید بنر اختصاصی، زمان ارسال برحسب دقیقه، فاصله بین پیام‌ها و روشن/خاموش بودن هر گروه را تنظیم کنید.\n\n"
+            f"⚡ <b>۴. دستورات کاربردی داخل اکانت سلف دارک:</b>\n"
+            f"• <code>.ping</code> (بررسی سرعت) | <code>.stats</code> (آمار سلف) | <code>.id</code> (آیدی عددی)\n"
+            f"• <code>.tr</code> (ترجمه با ریپلای) | <code>.sum</code> (خلاصه‌سازی با ریپلای)\n"
+            f"• <code>.calc 2+2</code> (ماشین حساب) | <code>.font text</code> (زیباسازی فونت)\n"
+            f"• <code>.note متن</code> (ثبت یادداشت گفتگو) | <code>.notebook</code> (مشاهده دفترچه)\n"
+            f"• <code>.del 5</code> (پاکسازی سریع پیام‌ها)\n\n"
+            f"{html.escape(extra_note)}"
         )
         kb = InlineKeyboardMarkup([
             [
-                p_btn("شروع ساخت دکمه شیشه‌ای", callback_data="menu:create_btn", style="primary", emoji_key="sparkles"),
-                p_btn("خرید اشتراک VIP", callback_data="menu:buy_vip", style="success", emoji_key="gem"),
+                p_btn("فعالسازی سلف دارک", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
+                p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
             ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await query.edit_message_text(help_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ====================================================================
-#  فرایند ساخت دکمه شیشه‌ای رنگی (گام‌به‌گام طبق دستور کاربر)
+#  مدیریت ۴۰ قابلیت سلف دارک (روشن/خاموش و تغییر مقادیر)
 # ====================================================================
 
-async def create_btn_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    data = query.data
 
-    not_joined = await check_user_joined_all(context.bot, user.id)
-    if not_joined:
-        await query.answer("⚠️ ابتدا در کانال‌های اسپانسر عضو شوید.", show_alert=True)
-        await query.edit_message_text(p_text("📢 ابتدا در کانال‌های زیر عضو شوید:"), parse_mode=ParseMode.HTML, reply_markup=build_force_join_keyboard(not_joined))
-        return ConversationHandler.END
-
-    allowed, used, limit = can_user_create_glass_button(user.id)
-    if not allowed:
-        await query.answer("⛔ سقف مجاز روزانه شما تمام شده است!", show_alert=True)
+    if data.startswith("self:features_page:"):
+        page = int(data.split(":")[2])
+        await query.answer()
         await query.edit_message_text(
             p_text(
-                f"⛔ <b>محدودیت روزانه اشتراک معمولی!</b>\n\n"
-                f"شما امروز <b>{used} از {limit}</b> دکمه شیشه‌ای رایگان خود را ساخته‌اید.\n"
-                f"برای ساخت دکمه شیشه‌ای <b>به‌صورت نامحدود و بدون تبلیغ</b>، اشتراک VIP تهیه کنید یا با دعوت ۶ دوست، ۱۰ روز VIP رایگان بگیرید:"
+                "🌑 <b>پنل تنظیمات ۴۰ قابلیت «سلف دارک | Self Dark»</b>\n\n"
+                "✨ روی هر قابلیت کلیک کنید تا <b>🟢 روشن</b> یا <b>🔴 خاموش</b> شود.\n"
+                "⚙️ قابلیت‌هایی که دکمه «تنظیم مقدار» دارند (مثل متن پاسخ خودکار، قالب بیو، ایموجی ری‌اکشن و...) قابل شخصی‌سازی کامل هستند:"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [p_btn("خرید اشتراک VIP نامحدود", callback_data="menu:buy_vip", style="success", emoji_key="gem")],
-                [p_btn("دریافت VIP رایگان (زیرمجموعه)", callback_data="menu:referral", style="primary", emoji_key="gift")],
-                [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
-            ])
+            reply_markup=build_features_keyboard(user.id, page)
         )
-        return ConversationHandler.END
 
+    elif data.startswith("ftoggle:"):
+        _, fkey, page_str = data.split(":")
+        page = int(page_str)
+        feats = get_user_features(user.id)
+        feats[fkey] = not feats.get(fkey, False)
+        save_user_features(user.id, feats)
+        st = "🟢 روشن شد" if feats[fkey] else "🔴 خاموش شد"
+        await query.answer(f"{SELF_DARK_FEATURES[fkey]['title']} {st}!")
+        await query.edit_message_reply_markup(reply_markup=build_features_keyboard(user.id, page))
+
+    elif data.startswith("fbulk:"):
+        _, mode, page_str = data.split(":")
+        page = int(page_str)
+        feats = get_user_features(user.id)
+        for k in SELF_DARK_FEATURES:
+            feats[k] = (mode == "on")
+        save_user_features(user.id, feats)
+        await query.answer("✅ وضعیت تمام ۴۰ قابلیت سلف دارک بروزرسانی شد!", show_alert=True)
+        await query.edit_message_reply_markup(reply_markup=build_features_keyboard(user.id, page))
+
+async def feature_set_val_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     await query.answer()
-    context.user_data["glass_builder"] = {}
+    _, fkey, page_str = query.data.split(":")
+    meta = SELF_DARK_FEATURES[fkey]
+    feats = get_user_features(query.from_user.id)
+    curr_val = feats.get(meta["val_key"], meta["default_val"])
+
+    context.user_data["edit_feat_key"] = fkey
+    context.user_data["edit_feat_page"] = int(page_str)
+
     await query.edit_message_text(
         p_text(
-            "🎨 <b>مرحله ۱ از ۵: ارسال محتوای پست</b>\n\n"
-            "✨ لطفاً الان <b>متن پست</b> خود را بفرستید، یا <b>عکس / ویدیو / گیف / فایل</b> خود را به همراه کپشن ارسال کنید:"
+            f"⚙️ <b>تنظیم مقدار برای «{meta['title']}»</b>\n\n"
+            f"📌 عنوان تنظیم: <b>{meta['val_label']}</b>\n"
+            f"🔹 مقدار فعلی:\n<code>{html.escape(str(curr_val))}</code>\n\n"
+            f"✨ لطفاً مقدار جدید را ارسال کنید:"
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
+        reply_markup=cancel_inline_keyboard(f"self:features_page:{page_str}")
     )
-    return BTN_WAIT_POST
+    return FEAT_WAIT_VAL
 
-async def create_btn_receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    post_info = {"type": "text", "text": "", "file_id": None}
+async def feature_set_val_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    fkey = context.user_data.get("edit_feat_key")
+    page = context.user_data.get("edit_feat_page", 0)
+    if not fkey or fkey not in SELF_DARK_FEATURES:
+        return ConversationHandler.END
 
-    if msg.photo:
-        post_info["type"] = "photo"
-        post_info["file_id"] = msg.photo[-1].file_id
-        post_info["text"] = html.escape(msg.caption or "")
-    elif msg.video:
-        post_info["type"] = "video"
-        post_info["file_id"] = msg.video.file_id
-        post_info["text"] = html.escape(msg.caption or "")
-    elif msg.animation:
-        post_info["type"] = "animation"
-        post_info["file_id"] = msg.animation.file_id
-        post_info["text"] = html.escape(msg.caption or "")
-    elif msg.document:
-        post_info["type"] = "document"
-        post_info["file_id"] = msg.document.file_id
-        post_info["text"] = html.escape(msg.caption or "")
-    elif msg.text:
-        post_info["type"] = "text"
-        post_info["text"] = html.escape(msg.text)
-    else:
-        await msg.reply_text(
-            p_text("⚠️ لطفاً یک متن، عکس، ویدیو، گیف یا فایل معتبر ارسال کنید:"),
+    meta = SELF_DARK_FEATURES[fkey]
+    new_val = update.message.text.strip()
+    feats = get_user_features(user.id)
+    feats[meta["val_key"]] = new_val
+    feats[fkey] = True
+    save_user_features(user.id, feats)
+
+    await update.message.reply_text(
+        p_text(f"✅ مقدار <b>{meta['val_label']}</b> با موفقیت ذخیره شد و قابلیت روشن گردید!"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_features_keyboard(user.id, page)
+    )
+    return ConversationHandler.END
+
+# ====================================================================
+#  بخش تبچی هوشمند سلف دارک (مدیریت گروه‌ها، بنر، زمان و فاصله)
+# ====================================================================
+
+async def tabchi_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+    await query.answer()
+
+    if data == "menu:tabchi":
+        feats = get_user_features(user.id)
+        tab_on = feats.get("tabchi_enabled", True)
+        with closing(get_conn()) as conn:
+            groups = conn.execute("SELECT * FROM tabchi_groups WHERE user_id=? ORDER BY id DESC", (user.id,)).fetchall()
+
+        st_badge = "🟢 فعال" if tab_on else "🔴 غیرفعال"
+        text = p_text(
+            f"📣 <b>بخش تبچی هوشمند «سلف دارک | Self Dark»</b>\n\n"
+            f"⚡ وضعیت کلی تبچی شما: <b>{st_badge}</b>\n"
+            f"📊 تعداد گروه‌های ثبت‌شده: <b>{len(groups)} گروه</b>\n\n"
+            f"🔹 <b>نحوه ثبت گروه جدید:</b>\n"
+            f"کافی است با اکانت سلف خود در گروه مورد نظر دستور <code>تنظیم چت</code> را ارسال کنید تا گروه بلافاصله در لیست زیر ظاهر شود!\n\n"
+            f"👇 برای تغییر بنر، تعیین زمان ارسال (دقیقه) یا روشن/خاموش کردن تبچی هر گروه، روی نام گروه کلیک کنید:"
+        )
+        rows = [
+            [
+                p_btn(
+                    f"وضعیت کلی تبچی: {st_badge}",
+                    callback_data="tabchi:toggle_master",
+                    style="success" if tab_on else "danger",
+                    emoji_key="megaphone"
+                )
+            ]
+        ]
+        for g in groups:
+            g_st = "🟢" if g["is_active"] == 1 else "🔴"
+            rows.append([
+                p_btn(
+                    f"{g_st} {g['chat_title']} (هر {g['interval_minutes']} دقیقه)",
+                    callback_data=f"tabchi:grp:{g['id']}",
+                    style="primary"
+                )
+            ])
+        rows.append([p_btn("تنظیم بنر همگانی برای همه گروه‌ها", callback_data="tabchi:set_all_banner", style="success", emoji_key="sparkles")])
+        rows.append([p_btn("بازگشت به منوی اصلی سلف دارک", callback_data="menu:main", style="danger", emoji_key="fire")])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+
+    elif data == "tabchi:toggle_master":
+        feats = get_user_features(user.id)
+        feats["tabchi_enabled"] = not feats.get("tabchi_enabled", True)
+        save_user_features(user.id, feats)
+        await tabchi_menu_callback(update, context)
+
+    elif data.startswith("tabchi:grp:"):
+        gid = int(data.split(":")[2])
+        await show_single_tabchi_group(query, user.id, gid)
+
+    elif data.startswith("tabchi:gtoggle:"):
+        gid = int(data.split(":")[2])
+        with closing(get_conn()) as conn, conn:
+            g = conn.execute("SELECT is_active FROM tabchi_groups WHERE id=? AND user_id=?", (gid, user.id)).fetchone()
+            if g:
+                new_st = 0 if g["is_active"] == 1 else 1
+                conn.execute("UPDATE tabchi_groups SET is_active=? WHERE id=?", (new_st, gid))
+        await show_single_tabchi_group(query, user.id, gid)
+
+    elif data.startswith("tabchi:gdel:"):
+        gid = int(data.split(":")[2])
+        with closing(get_conn()) as conn, conn:
+            conn.execute("DELETE FROM tabchi_groups WHERE id=? AND user_id=?", (gid, user.id))
+        await query.answer("🗑 گروه از تبچی حذف شد.", show_alert=True)
+        query.data = "menu:tabchi"
+        await tabchi_menu_callback(update, context)
+
+async def show_single_tabchi_group(query, user_id: int, gid: int):
+    with closing(get_conn()) as conn:
+        g = conn.execute("SELECT * FROM tabchi_groups WHERE id=? AND user_id=?", (gid, user_id)).fetchone()
+    if not g:
+        await query.edit_message_text("❌ گروه یافت نشد.", reply_markup=cancel_inline_keyboard("menu:tabchi"))
+        return
+
+    st = "🟢 فعال" if g["is_active"] == 1 else "🔴 غیرفعال"
+    text = p_text(
+        f"⚙️ <b>مدیریت گروه تبچی: {html.escape(g['chat_title'])}</b>\n\n"
+        f"🔢 آیدی چت: <code>{g['chat_id']}</code>\n"
+        f"📌 وضعیت تبچی این گروه: <b>{st}</b>\n"
+        f"⏰ زمان ارسال پیام: <b>هر {g['interval_minutes']} دقیقه</b>\n"
+        f"⏳ فاصله زمانی دقیق بین پیام‌ها: <b>{g['delay_seconds']} ثانیه</b>\n\n"
+        f"📝 <b>متن/بنر اختصاصی فعلی:</b>\n"
+        f"<code>{html.escape(g['banner_text'])}</code>"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            p_btn(
+                f"تغییر وضعیت ({st})",
+                callback_data=f"tabchi:gtoggle:{gid}",
+                style="success" if g["is_active"] == 1 else "danger"
+            )
+        ],
+        [
+            p_btn("ثبت بنر/متن اختصاصی", callback_data=f"tabchi_edit:banner:{gid}", style="primary", emoji_key="sparkles"),
+            p_btn("تعیین زمان ارسال (دقیقه)", callback_data=f"tabchi_edit:interval:{gid}", style="primary", emoji_key="zap"),
+        ],
+        [
+            p_btn("تنظیم فاصله زمانی (ثانیه)", callback_data=f"tabchi_edit:delay:{gid}", style="primary"),
+            p_btn("حذف این گروه از تبچی", callback_data=f"tabchi:gdel:{gid}", style="danger", emoji_key="fire"),
+        ],
+        [p_btn("بازگشت به لیست گروه‌های تبچی", callback_data="menu:tabchi", style="primary", emoji_key="megaphone")]
+    ])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def tabchi_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "tabchi:set_all_banner":
+        context.user_data["tabchi_edit_gid"] = "ALL"
+        await query.edit_message_text(
+            p_text("📣 <b>تنظیم بنر و متن همگانی برای تمام گروه‌های تبچی</b>\n\nلطفاً متن بنر جدید را ارسال کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:tabchi")
+        )
+        return TABCHI_WAIT_BANNER
+
+    _, mode, gid_str = data.split(":")
+    gid = int(gid_str)
+    context.user_data["tabchi_edit_gid"] = gid
+
+    if mode == "banner":
+        await query.edit_message_text(
+            p_text("📝 <b>لطفاً متن یا بنر اختصاصی جدید برای این گروه را ارسال کنید:</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"tabchi:grp:{gid}")
+        )
+        return TABCHI_WAIT_BANNER
+    elif mode == "interval":
+        await query.edit_message_text(
+            p_text("⏰ <b>فاصله زمانی ارسال پیام به این گروه را برحسب دقیقه وارد کنید (مثلاً 5 یا 15):</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"tabchi:grp:{gid}")
+        )
+        return TABCHI_WAIT_INTERVAL
+    elif mode == "delay":
+        await query.edit_message_text(
+            p_text("⏳ <b>فاصله تاخیر دقیق بین پیام‌ها را برحسب ثانیه وارد کنید (مثلاً 3):</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"tabchi:grp:{gid}")
+        )
+        return TABCHI_WAIT_DELAY
+
+async def tabchi_save_banner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    gid = context.user_data.get("tabchi_edit_gid")
+    txt = update.message.text.strip()
+    with closing(get_conn()) as conn, conn:
+        if gid == "ALL":
+            conn.execute("UPDATE tabchi_groups SET banner_text=? WHERE user_id=?", (txt, user.id))
+        else:
+            conn.execute("UPDATE tabchi_groups SET banner_text=? WHERE id=? AND user_id=?", (txt, int(gid), user.id))
+    await update.message.reply_text(
+        p_text("✅ <b>بنر تبچی سلف دارک با موفقیت ذخیره شد!</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به مدیریت تبچی", callback_data="menu:tabchi", style="primary", emoji_key="megaphone")]])
+    )
+    return ConversationHandler.END
+
+async def tabchi_save_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    gid = context.user_data.get("tabchi_edit_gid")
+    txt = update.message.text.strip()
+    if not txt.isdigit() or int(txt) < 1:
+        await update.message.reply_text(p_text("⚠️ لطفاً یک عدد صحیح بزرگ‌تر از ۱ وارد کنید:"), parse_mode=ParseMode.HTML)
+        return TABCHI_WAIT_INTERVAL
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE tabchi_groups SET interval_minutes=? WHERE id=? AND user_id=?", (int(txt), int(gid), user.id))
+    await update.message.reply_text(
+        p_text(f"✅ زمان ارسال تبچی روی <b>هر {txt} دقیقه</b> تنظیم شد!"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به تنظیمات گروه", callback_data=f"tabchi:grp:{gid}", style="primary")]])
+    )
+    return ConversationHandler.END
+
+async def tabchi_save_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    gid = context.user_data.get("tabchi_edit_gid")
+    txt = update.message.text.strip()
+    if not txt.isdigit() or int(txt) < 1:
+        await update.message.reply_text(p_text("⚠️ لطفاً یک عدد صحیح وارد کنید:"), parse_mode=ParseMode.HTML)
+        return TABCHI_WAIT_DELAY
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE tabchi_groups SET delay_seconds=? WHERE id=? AND user_id=?", (int(txt), int(gid), user.id))
+    await update.message.reply_text(
+        p_text(f"✅ فاصله دقیق بین پیام‌ها روی <b>{txt} ثانیه</b> تنظیم شد!"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به تنظیمات گروه", callback_data=f"tabchi:grp:{gid}", style="primary")]])
+    )
+    return ConversationHandler.END
+
+# ====================================================================
+#  فرایند واقعی فعال‌سازی سلف دارک (دریافت شماره با دکمه تلگرام + کد + 2FA)
+# ====================================================================
+
+async def activate_self_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    if get_setting("self_new_login_enabled", "1") == "0" and not is_admin(user.id):
+        await query.edit_message_text(
+            p_text("⚠️ ثبت سلف جدید موقتاً توسط مدیریت غیرفعال شده است."),
             parse_mode=ParseMode.HTML,
             reply_markup=cancel_inline_keyboard("menu:main")
         )
-        return BTN_WAIT_POST
-
-    context.user_data["glass_builder"]["post"] = post_info
-    await msg.reply_text(
-        p_text(
-            "🔗 <b>مرحله ۲ از ۵: ارسال لینک دکمه شیشه‌ای</b>\n\n"
-            "✨ لطفاً <b>لینکی</b> که می‌خواهید داخل دکمه شیشه‌ای قرار بگیرد را ارسال کنید\n"
-            "<i>(مثال: https://t.me/YourChannel یا آدرس سایت)</i>:"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
-    )
-    return BTN_WAIT_URL
-
-async def create_btn_receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_url = update.message.text.strip()
-    if raw_url.startswith("@"):
-        raw_url = f"https://t.me/{raw_url[1:]}"
-    elif raw_url.startswith("t.me/"):
-        raw_url = f"https://{raw_url}"
-    elif not raw_url.startswith(("http://", "https://", "tg://")):
-        raw_url = f"https://{raw_url}"
-
-    context.user_data["glass_builder"]["btn_url"] = raw_url
-    await update.message.reply_text(
-        p_text(
-            "🏷 <b>مرحله ۳ از ۵: نام روی دکمه شیشه‌ای</b>\n\n"
-            "✨ حالا <b>اسم یا متنی</b> که می‌خواهید روی دکمه شیشه‌ای نمایش داده شود را بفرستید\n"
-            "<i>(مثال: دانلود فایل | ورود به سایت | عضویت در کانال)</i>:"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
-    )
-    return BTN_WAIT_TEXT
-
-async def create_btn_receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    btn_text = update.message.text.strip()
-    context.user_data["glass_builder"]["btn_text"] = btn_text
-
-    color_kb = InlineKeyboardMarkup([
-        [
-            p_btn("رنگ آبی (Primary)", callback_data="btncolor:primary", style="primary", emoji_key="gem"),
-            p_btn("رنگ سبز (Success)", callback_data="btncolor:success", style="success", emoji_key="check"),
-        ],
-        [
-            p_btn("رنگ قرمز (Danger)", callback_data="btncolor:danger", style="danger", emoji_key="fire"),
-            p_btn("رنگ معمولی دکمه شیشه‌ای", callback_data="btncolor:normal", emoji_key="sparkles"),
-        ],
-        [
-            p_btn("انصراف و بازگشت", callback_data="menu:main", style="danger", emoji_key="fire")
-        ]
-    ])
-    await update.message.reply_text(
-        p_text(
-            "🎨 <b>مرحله ۴ از ۵: انتخاب رنگ دکمه شیشه‌ای</b>\n\n"
-            "✨ لطفاً رنگ دکمه شیشه‌ای خود را از بین گزینه‌های زیر انتخاب کنید:"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=color_kb
-    )
-    return BTN_WAIT_COLOR
-
-async def create_btn_receive_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chosen_color = query.data.split(":")[1]
-    context.user_data["glass_builder"]["btn_color"] = chosen_color
-
-    color_labels = {
-        "primary": "🔵 آبی",
-        "success": "🟢 سبز",
-        "danger": "🔴 قرمز",
-        "normal": "✨ معمولی شیشه‌ای"
-    }
-    await query.edit_message_text(
-        p_text(
-            f"✅ رنگ انتخاب شده: <b>{color_labels.get(chosen_color, 'معمولی')}</b>\n\n"
-            f"📢 <b>مرحله ۵ از ۵: لینک یا آیدی کانال مقصد</b>\n\n"
-            f"حالا <b>لینک یا یوزرنیم کانالی</b> که می‌خواهید این پست در آن قرار بگیرد را بفرستید\n"
-            f"<i>(مثال: https://t.me/MyChannel یا @MyChannel)</i>\n\n"
-            f"⚠️ <b>حتماً توجه کنید که ربات در کانال شما Admin (مدیر) باشد.</b>"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
-    )
-    return BTN_WAIT_CHANNEL
-
-async def create_btn_receive_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    raw_ch = update.message.text.strip()
-    channel_id = normalize_channel_identifier(raw_ch)
-    context.user_data["glass_builder"]["target_channel"] = channel_id
-
-    builder = context.user_data["glass_builder"]
-    post_data = builder["post"]
-    btn_text = builder["btn_text"]
-    btn_url = builder["btn_url"]
-    btn_color = builder["btn_color"]
-
-    final_text = post_data.get("text", "")
-    if should_append_bot_ad(user.id):
-        bot_me = await context.bot.get_me()
-        ad_sig = p_text(get_setting("ad_signature", "✨ ساخته شده با ربات: @{bot_username}").replace("{bot_username}", bot_me.username))
-        final_text = f"{final_text}\n\n{ad_sig}".strip()
-    builder["final_text"] = final_text
-
-    if btn_color in ("primary", "success", "danger"):
-        preview_btn = InlineKeyboardButton(btn_text, url=btn_url, style=btn_color)
-    else:
-        preview_btn = InlineKeyboardButton(btn_text, url=btn_url)
-
-    confirm_kb = InlineKeyboardMarkup([
-        [preview_btn],
-        [p_btn("پست کردن در کانال", callback_data="publish_glass_post", style="success", emoji_key="rocket")],
-        [p_btn("انصراف و لغو", callback_data="menu:main", style="danger", emoji_key="fire")]
-    ])
-
-    await update.message.reply_text(
-        p_text(
-            f"👁 <b>پیش‌نمایش پست شما (آماده ارسال به {html.escape(channel_id)}):</b>\n"
-            f"✨ در صورت تایید، روی دکمه سبز <b>«🚀 پست کردن در کانال»</b> زیر پست بزنید:"
-        ),
-        parse_mode=ParseMode.HTML
-    )
-    await send_stored_post(context.bot, update.effective_chat.id, post_data, reply_markup=confirm_kb, custom_text=final_text)
-    return BTN_WAIT_CONFIRM
-
-async def create_btn_publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    builder = context.user_data.get("glass_builder")
-    if not builder:
-        await query.answer("اطلاعات پست یافت نشد. دوباره تلاش کنید.", show_alert=True)
         return ConversationHandler.END
 
-    post_data = builder["post"]
-    btn_text = builder["btn_text"]
-    btn_url = builder["btn_url"]
-    btn_color = builder["btn_color"]
-    target_channel = builder["target_channel"]
-    final_text = builder["final_text"]
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    act_cost = int(get_setting("activation_cost", "30"))
+    hr_cost = int(get_setting("hourly_cost", "3"))
 
-    if btn_color in ("primary", "success", "danger"):
-        channel_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=btn_url, style=btn_color)]])
-    else:
-        channel_markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=btn_url)]])
-
-    try:
-        await send_stored_post(context.bot, target_channel, post_data, reply_markup=channel_markup, custom_text=final_text)
-        increment_user_usage(user.id, "glass_button", target_channel)
-        await query.answer("✅ با موفقیت در کانال پست شد!", show_alert=True)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=p_text(
-                f"✅ <b>پست شما با دکمه شیشه‌ای رنگی با موفقیت در کانال {html.escape(target_channel)} منتشر شد!</b> 🎉"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [p_btn("ساخت دکمه شیشه‌ای جدید", callback_data="menu:create_btn", style="primary", emoji_key="sparkles")],
-                [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="success", emoji_key="glow")]
-            ])
-        )
-    except Exception as e:
-        await query.answer("❌ خطا در ارسال به کانال!", show_alert=True)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=p_text(
-                f"❌ <b>خطا در ارسال پست به کانال ({html.escape(target_channel)})!</b>\n\n"
-                f"⚠️ لطفاً مطمئن شوید:\n"
-                f"1️⃣ ربات را در کانال <b>Admin (مدیر)</b> کرده‌اید و دسترسی ارسال پست (Post Messages) دارد.\n"
-                f"2️⃣ لینک یا آیدی کانال را به درستی وارد کرده‌اید.\n\n"
-                f"جزئیات فنی: <code>{html.escape(str(e)[:120])}</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_inline_keyboard(user.id)
-        )
-
-    context.user_data.pop("glass_builder", None)
-    return ConversationHandler.END
-
-# ====================================================================
-#  بخش استفاده از ایموجی پریمیوم تلگرام در کانال (مخصوص VIP)
-# ====================================================================
-
-async def premium_emoji_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    not_joined = await check_user_joined_all(context.bot, user.id)
-    if not_joined:
-        await query.answer("⚠️ ابتدا در کانال‌های اسپانسر عضو شوید.", show_alert=True)
-        await query.edit_message_text(p_text("📢 ابتدا در کانال‌های زیر عضو شوید:"), parse_mode=ParseMode.HTML, reply_markup=build_force_join_keyboard(not_joined))
-        return ConversationHandler.END
-
-    if not is_user_vip(user.id):
-        await query.answer("💎 این بخش مخصوص کاربران VIP است!", show_alert=True)
+    # بررسی اینکه آیا قبلاً سلف داشته است یا خیر
+    acc = get_self_account(user.id)
+    if acc and acc["is_running"] == 1:
         await query.edit_message_text(
             p_text(
-                "✨ <b>بخش ایموجی پریمیوم تلگرام در کانال (ویژه VIP)</b>\n\n"
-                "⛔ این قابلیت فقط با داشتن <b>اشتراک VIP</b> فعال می‌شود.\n"
-                "🔥 در این بخش، شما پست خود را با ایموجی‌های معمولی می‌فرستید و ربات به‌صورت خودکار آن را با <b>ایموجی‌های پریمیوم و متحرک تلگرام</b> تزیین کرده و در کانال شما پست می‌کند!\n\n"
-                "💎 همین حالا اشتراک VIP تهیه کنید:"
+                f"✅ <b>سلف دارک شما هم‌اکنون روی شماره <code>{acc['phone']}</code> فعال و روشن است!</b>\n\n"
+                f"می‌توانید قابلیت‌ها را تنظیم کنید یا سلف را موقتاً خاموش نمایید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [p_btn("خرید اشتراک VIP", callback_data="menu:buy_vip", style="success", emoji_key="gem")],
-                [p_btn("دریافت VIP رایگان با زیرمجموعه", callback_data="menu:referral", style="primary", emoji_key="gift")],
+                [p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+                [p_btn("خاموش کردن سلف دارک", callback_data="self:stop_now", style="danger", emoji_key="fire")],
+                [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")]
+            ])
+        )
+        return ConversationHandler.END
+
+    if db_user["diamonds"] < act_cost and not is_admin(user.id):
+        await query.edit_message_text(
+            p_text(
+                f"⛔ <b>موجودی الماس شما برای فعال‌سازی سلف دارک کافی نیست!</b>\n\n"
+                f"💎 هزینه فعال‌سازی سلف دارک: <b>{act_cost} الماس</b> (و ساعتی {hr_cost} الماس)\n"
+                f"💰 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n\n"
+                f"👇 لطفاً ابتدا حساب خود را شارژ کنید یا با دعوت دوستان الماس رایگان بگیرید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [p_btn("خرید الماس (TON / کارت به کارت)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem")],
+                [p_btn("دریافت الماس رایگان (زیرمجموعه)", callback_data="menu:referral", style="primary", emoji_key="gift")],
                 [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
             ])
         )
         return ConversationHandler.END
 
-    await query.answer()
-    context.user_data["emoji_builder"] = {}
-    await query.edit_message_text(
+    contact_kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 ارسال شماره تلگرام من برای فعالسازی سلف دارک", request_contact=True, style="success")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+    await query.message.reply_text(
         p_text(
-            "✨ <b>زیباسازی پست با ایموجی‌های پریمیوم تلگرام (مرحله ۱ از ۲)</b>\n\n"
-            "لطفاً <b>پست خود (متن، عکس یا ویدیو)</b> را که حاوی ایموجی‌های معمولی است (مثل 🔥 ❤️ 💎 ✅ ⭐ 🚀 🎉 💰 ✨) برای ربات بفرستید تا ربات به صورت خودکار آن را با ایموجی‌های پریمیوم و متحرک زیبا کند:"
+            f"🌑 <b>مرحله ۱ از ۲: ارسال شماره تلگرام برای فعال‌سازی سلف دارک</b>\n\n"
+            f"💎 هزینه فعال‌سازی: <b>{act_cost} الماس</b> | روشن ماندن: <b>ساعتی {hr_cost} الماس</b>\n\n"
+            f"👇 لطفاً روی دکمه سبز رنگ <b>«📱 ارسال شماره تلگرام من برای فعالسازی سلف دارک»</b> در پایین صفحه ضربه بزنید تا شماره اکانت شما ارسال شود (یا شماره را با پیش‌شماره مثل <code>+98912...</code> بفرستید):"
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
+        reply_markup=contact_kb
     )
-    return EMOJI_WAIT_POST
+    return SELF_WAIT_PHONE
 
-async def premium_emoji_receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def activate_self_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     msg = update.message
-    post_info = {"type": "text", "text": "", "file_id": None}
-    raw_text = ""
+    phone = ""
 
-    if msg.photo:
-        post_info["type"] = "photo"
-        post_info["file_id"] = msg.photo[-1].file_id
-        raw_text = msg.caption or ""
-    elif msg.video:
-        post_info["type"] = "video"
-        post_info["file_id"] = msg.video.file_id
-        raw_text = msg.caption or ""
+    if msg.contact and msg.contact.phone_number:
+        phone = msg.contact.phone_number
     elif msg.text:
-        post_info["type"] = "text"
-        raw_text = msg.text
+        phone = msg.text.strip().replace(" ", "")
     else:
-        await msg.reply_text(p_text("⚠️ لطفاً متن، عکس یا ویدیو ارسال کنید:"), parse_mode=ParseMode.HTML, reply_markup=cancel_inline_keyboard("menu:main"))
-        return EMOJI_WAIT_POST
+        await msg.reply_text(p_text("⚠️ لطفاً از دکمه ارسال شماره استفاده کنید:"), parse_mode=ParseMode.HTML)
+        return SELF_WAIT_PHONE
 
-    beautified_html = convert_to_premium_emoji_html(raw_text)
-    post_info["text"] = beautified_html
-    context.user_data["emoji_builder"]["post"] = post_info
+    if not phone.startswith("+"):
+        phone = "+" + phone
 
-    await msg.reply_text(
-        p_text(
-            "📢 <b>مرحله ۲ از ۲: ارسال لینک یا آیدی کانال</b>\n\n"
-            "پست شما با ایموجی‌های پریمیوم آماده شد! ✨\n"
-            "حالا <b>لینک یا یوزرنیم کانال</b> انتخابی خود را بفرستید تا در آن پست شود\n"
-            "<i>(مثال: https://t.me/MyChannel یا @MyChannel)</i>:"
-        ),
+    wait_msg = await msg.reply_text(
+        p_text("⏳ در حال اتصال به سرور تلگرام و ارسال کد ورود برای اکانت شما..."),
         parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:main")
+        reply_markup=ReplyKeyboardRemove()
     )
-    return EMOJI_WAIT_CHANNEL
-
-async def premium_emoji_receive_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_ch = update.message.text.strip()
-    channel_id = normalize_channel_identifier(raw_ch)
-    context.user_data["emoji_builder"]["target_channel"] = channel_id
-    post_data = context.user_data["emoji_builder"]["post"]
-
-    confirm_kb = InlineKeyboardMarkup([
-        [p_btn("پست کردن در کانال با ایموجی پریمیوم", callback_data="publish_emoji_post", style="success", emoji_key="rocket")],
-        [p_btn("انصراف و بازگشت", callback_data="menu:main", style="danger", emoji_key="fire")]
-    ])
-
-    await update.message.reply_text(
-        p_text(f"✨ <b>پیش‌نمایش پست شما با ایموجی‌های پریمیوم (مقصد: {html.escape(channel_id)}):</b>"),
-        parse_mode=ParseMode.HTML
-    )
-    await send_stored_post(context.bot, update.effective_chat.id, post_data, reply_markup=confirm_kb)
-    return EMOJI_WAIT_CONFIRM
-
-async def premium_emoji_publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    builder = context.user_data.get("emoji_builder")
-    if not builder:
-        await query.answer("اطلاعات یافت نشد.", show_alert=True)
-        return ConversationHandler.END
-
-    post_data = builder["post"]
-    target_channel = builder["target_channel"]
 
     try:
-        await send_stored_post(context.bot, target_channel, post_data)
-        increment_user_usage(user.id, "premium_emoji", target_channel)
-        await query.answer("✅ پست با ایموجی پریمیوم در کانال منتشر شد!", show_alert=True)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=p_text(f"✅ <b>پست شما با ایموجی‌های پریمیوم با موفقیت در کانال {html.escape(target_channel)} منتشر شد!</b> 🎉"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_inline_keyboard(user.id)
-        )
-    except Exception as e:
-        await query.answer("❌ خطا در ارسال به کانال!", show_alert=True)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=p_text(
-                f"❌ <b>خطا در ارسال به کانال {html.escape(target_channel)}!</b>\n"
-                f"⚠️ مطمئن شوید ربات در کانال شما Admin است.\n"
-                f"خطا: <code>{html.escape(str(e)[:100])}</code>"
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        sent_code = await client.send_code_request(phone)
+        PENDING_LOGINS[user.id] = {
+            "client": client,
+            "phone": phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+        }
+        await wait_msg.edit_text(
+            p_text(
+                f"✅ <b>کد ورود ۵ رقمی به تلگرام شما ({phone}) ارسال شد!</b>\n\n"
+                f"⚠️ <b>نکته بسیار مهم:</b> برای اینکه تلگرام کد را مسدود نکند، لطفاً کد ۵ رقمی را با <b>فاصله</b> یا <b>خط تیره</b> بفرستید!\n"
+                f"📌 مثال: <code>1-2-3-4-5</code> یا <code>1 2 3 4 5</code>"
             ),
             parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return SELF_WAIT_CODE
+    except FloodWaitError as fw:
+        await wait_msg.edit_text(
+            p_text(f"⛔ محدودیت موقت تلگرام! لطفاً {fw.seconds} ثانیه دیگر تلاش کنید."),
+            parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
-
-    context.user_data.pop("emoji_builder", None)
-    return ConversationHandler.END
-
-# ====================================================================
-#  خرید اشتراک VIP و ارسال رسید کارت به کارت
-# ====================================================================
-
-async def buy_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    days = int(query.data.split(":")[1])
-
-    if days == 30:
-        amount = int(get_setting("price_30d", "50000"))
-        plan_title = "اشتراک VIP یک‌ماهه (۳۰ روزه)"
-    else:
-        amount = int(get_setting("price_90d", "199000"))
-        plan_title = "اشتراک VIP سه‌ماهه (۹۰ روزه)"
-
-    card_no = get_setting("card_number", "6037-9975-0000-0000")
-    card_holder = get_setting("card_holder", "مدیریت ربات")
-
-    context.user_data["pending_vip_plan"] = {
-        "days": days,
-        "amount": amount,
-        "title": plan_title
-    }
-
-    text = p_text(
-        f"💳 <b>پرداخت کارت به کارت — {plan_title}</b>\n\n"
-        f"💰 مبلغ قابل پرداخت: <b>{amount:,} تومان</b>\n"
-        f"💳 شماره کارت جهت واریز:\n"
-        f"<code>{card_no}</code>\n"
-        f"👤 به نام: <b>{html.escape(card_holder)}</b>\n\n"
-        f"✨ <b>لطفاً پس از واریز، عکس رسید پرداخت خود را در همین صفحه ارسال کنید تا پس از تایید مدیر، اشتراک شما بلافاصله فعال شود:</b>"
-    )
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("menu:buy_vip")
-    )
-    return PAY_WAIT_RECEIPT
-
-async def buy_plan_receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    plan = context.user_data.get("pending_vip_plan")
-    if not plan:
-        await update.message.reply_text(p_text("❌ خطا در اطلاعات پلن."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        return ConversationHandler.END
+    except Exception as e:
+        await wait_msg.edit_text(
+            p_text(f"❌ خطا در ارسال کد به شماره <code>{html.escape(phone)}</code>:\n<code>{html.escape(str(e)[:120])}</code>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
         return ConversationHandler.END
 
-    if not update.message.photo:
+async def activate_self_receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    raw_code = update.message.text.strip()
+    clean_code = re.sub(r"[^0-9]", "", raw_code)
+
+    login_info = PENDING_LOGINS.get(user.id)
+    if not login_info:
+        await update.message.reply_text(p_text("❌ نشست ورود منقضی شده است. دوباره تلاش کنید."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        return ConversationHandler.END
+
+    client: TelegramClient = login_info["client"]
+    phone = login_info["phone"]
+    phone_code_hash = login_info["phone_code_hash"]
+
+    try:
+        await client.sign_in(phone=phone, code=clean_code, phone_code_hash=phone_code_hash)
+        return await finalize_self_dark_login(update, context, user, client, phone)
+    except SessionPasswordNeededError:
         await update.message.reply_text(
-            p_text("⚠️ لطفاً تصویر (عکس) رسید پرداخت را ارسال کنید:"),
+            p_text("🔐 <b>اکانت شما دارای رمز دو مرحله‌ای (Two-Step Verification) است.</b>\nلطفاً رمز دو مرحله‌ای اکانت خود را ارسال کنید:"),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("menu:buy_vip")
+            reply_markup=cancel_inline_keyboard("menu:main")
         )
-        return PAY_WAIT_RECEIPT
+        return SELF_WAIT_2FA
+    except PhoneCodeInvalidError:
+        await update.message.reply_text(
+            p_text("❌ کد وارد شده اشتباه است! لطفاً کد صحیح را با خط تیره (مثلاً <code>1-2-3-4-5</code>) بفرستید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return SELF_WAIT_CODE
+    except PhoneCodeExpiredError:
+        await client.disconnect()
+        PENDING_LOGINS.pop(user.id, None)
+        await update.message.reply_text(
+            p_text("⏰ کد ورود منقضی شده است. لطفاً مجدداً فرآیند فعال‌سازی را شروع کنید."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
+    except Exception as e:
+        await client.disconnect()
+        PENDING_LOGINS.pop(user.id, None)
+        await update.message.reply_text(
+            p_text(f"❌ خطا در ورود به اکانت:\n<code>{html.escape(str(e)[:120])}</code>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
 
-    photo_id = update.message.photo[-1].file_id
+async def activate_self_receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    password = update.message.text.strip()
+    login_info = PENDING_LOGINS.get(user.id)
+    if not login_info:
+        await update.message.reply_text(p_text("❌ نشست ورود یافت نشد."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        return ConversationHandler.END
+
+    client: TelegramClient = login_info["client"]
+    phone = login_info["phone"]
+
+    try:
+        await client.sign_in(password=password)
+        return await finalize_self_dark_login(update, context, user, client, phone)
+    except Exception as e:
+        await update.message.reply_text(
+            p_text(f"❌ رمز دو مرحله‌ای اشتباه است یا خطایی رخ داد:\n<code>{html.escape(str(e)[:100])}</code>\nلطفاً دوباره رمز را بفرستید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return SELF_WAIT_2FA
+
+async def finalize_self_dark_login(update: Update, context: ContextTypes.DEFAULT_TYPE, user, client: TelegramClient, phone: str):
+    PENDING_LOGINS.pop(user.id, None)
+    session_str = client.session.save()
+    await client.disconnect()
+
+    act_cost = int(get_setting("activation_cost", "30"))
+    hr_cost = int(get_setting("hourly_cost", "3"))
+
+    if not is_admin(user.id):
+        add_user_diamonds(user.id, -act_cost)
+
+    now_iso = datetime.now().isoformat()
+    default_feats = json.dumps(get_default_features_dict(), ensure_ascii=False)
+
     with closing(get_conn()) as conn, conn:
-        cur = conn.execute(
-            """INSERT INTO payments (user_id, plan_type, days, amount, photo_file_id, status, created_at)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
-            (user.id, plan["title"], plan["days"], plan["amount"], photo_id, datetime.now().isoformat())
+        conn.execute(
+            """INSERT OR REPLACE INTO self_accounts
+               (user_id, phone, session_string, is_running, activated_at, last_hourly_charge, features_json)
+               VALUES (?, ?, ?, 1, ?, ?, COALESCE((SELECT features_json FROM self_accounts WHERE user_id=?), ?))""",
+            (user.id, phone, session_str, now_iso, now_iso, user.id, default_feats)
         )
-        pay_id = cur.lastrowid
 
+    await start_single_self_client(user.id, session_str)
+
+    # ارسال پیام تبریک به کاربر
     await update.message.reply_text(
         p_text(
-            f"✅ <b>رسید پرداخت شما با کد پیگیری #{pay_id} دریافت شد!</b>\n"
-            f"✨ به‌محض بررسی و تایید توسط مدیریت، اشتراک <b>{plan['title']}</b> برای شما فعال شده و پیام تایید برایتان ارسال می‌گردد."
+            f"🎉 <b>تبریک! «سلف دارک | Self Dark» با موفقیت روی اکانت شما فعال شد!</b>\n\n"
+            f"📱 شماره متصل: <code>{phone}</code>\n"
+            f"💎 هزینه کسر شده فعال‌سازی: <b>{act_cost} الماس</b> (ساعتی {hr_cost} الماس)\n\n"
+            f"✨ هم‌اکنون می‌توانید از دکمه‌های زیر ۴۰ قابلیت سلف دارک و تبچی هوشمند را شخصی‌سازی کنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [p_btn("مدیریت ۴۰ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+            [p_btn("مدیریت تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="success", emoji_key="megaphone")],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")]
+        ])
+    )
+
+    # اطلاع‌رسانی کامل به ادمین اصلی (8248647747) با مشخصات و شماره کاربر
+    admin_report = p_text(
+        f"🚨 <b>گزارش فعال‌سازی جدید «سلف دارک | Self Dark»</b>\n\n"
+        f"👤 نام کاربر: <b>{html.escape(user.first_name)}</b>\n"
+        f"🆔 یوزرنیم: @{user.username or 'ندارد'}\n"
+        f"🔢 آیدی عددی: <code>{user.id}</code>\n"
+        f"📱 شماره تلفن اکانت: <code>{phone}</code>\n"
+        f"⏰ زمان فعال‌سازی: <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>"
+    )
+    for adm in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=adm, text=admin_report, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"خطا در ارسال گزارش فعال‌سازی سلف به ادمین: {e}")
+
+    return ConversationHandler.END
+
+async def stop_self_now_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    await stop_single_self_client(user.id)
+    await query.answer("🔴 سلف دارک شما متوقف شد.", show_alert=True)
+    await query.edit_message_text(
+        p_text("🔴 <b>سلف دارک شما با موفقیت خاموش شد و کسر ساعتی الماس متوقف گردید.</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+
+# ====================================================================
+#  فرایند خرید الماس با ارز دیجیتال TON (محاسبه خودکار و تایید ادمین)
+# ====================================================================
+
+async def buy_ton_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ton_rate = float(get_setting("ton_per_diamond", "0.0005"))
+    min_buy = int(get_setting("min_buy_diamonds", "50"))
+
+    await query.edit_message_text(
+        p_text(
+            f"💎 <b>خرید الماس با ارز دیجیتال TON (تون کوین)</b>\n\n"
+            f"✨ قیمت هر ۱ الماس: <b>{ton_rate} TON</b>\n"
+            f"🔢 حداقل تعداد قابل خرید: <b>{min_buy} الماس</b>\n\n"
+            f"👇 لطفاً <b>تعداد الماسی</b> که می‌خواهید خریداری کنید را به صورت عدد انگلیسی وارد کنید (مثلاً <code>100</code> یا <code>500</code>):"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("menu:buy_diamonds")
+    )
+    return BUY_WAIT_DIAMOND_COUNT
+
+async def buy_ton_receive_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    txt = update.message.text.strip()
+    min_buy = int(get_setting("min_buy_diamonds", "50"))
+    ton_rate = float(get_setting("ton_per_diamond", "0.0005"))
+    wallet = get_setting("ton_wallet", "UQD_YOUR_TON_WALLET_ADDRESS_HERE")
+
+    if not txt.isdigit() or int(txt) < min_buy:
+        await update.message.reply_text(
+            p_text(f"⚠️ لطفاً یک عدد صحیح حداقل برابر با <b>{min_buy} الماس</b> وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:buy_diamonds")
+        )
+        return BUY_WAIT_DIAMOND_COUNT
+
+    diamonds = int(txt)
+    total_ton = round(diamonds * ton_rate, 6)
+    ton_str = f"{total_ton:g}"
+
+    with closing(get_conn()) as conn, conn:
+        cur = conn.execute(
+            """INSERT INTO ton_orders (user_id, diamonds, ton_amount, wallet_address, status, created_at)
+               VALUES (?, ?, ?, ?, 'pending', ?)""",
+            (user.id, diamonds, ton_str, wallet, datetime.now().isoformat())
+        )
+        order_id = cur.lastrowid
+
+    text = p_text(
+        f"🧾 <b>فاکتور خرید الماس با ارز دیجیتال TON (#{order_id})</b>\n\n"
+        f"💎 تعداد الماس درخواستی: <b>{diamonds:,} الماس</b>\n"
+        f"💰 مبلغ دقیق قابل واریز: <code>{ton_str}</code> <b>TON</b>\n\n"
+        f"🏦 <b>آدرس ولت TON جهت واریز:</b>\n"
+        f"<code>{html.escape(wallet)}</code>\n\n"
+        f"📌 لطفاً دقیقاً مبلغ <b>{ton_str} TON</b> را به آدرس ولت بالا واریز نمایید و سپس روی دکمه سبز <b>«✅ پرداخت کردم»</b> در زیر کلیک کنید تا درخواست تایید برای ادمین ارسال شود:"
+    )
+    kb = InlineKeyboardMarkup([
+        [p_btn("پرداخت کردم (ارسال برای تایید ادمین)", callback_data=f"tonpaid:{order_id}", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="menu:buy_diamonds", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return ConversationHandler.END
+
+async def ton_paid_user_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    order_id = int(query.data.split(":")[1])
+
+    with closing(get_conn()) as conn, conn:
+        order = conn.execute("SELECT * FROM ton_orders WHERE id=? AND user_id=?", (order_id, user.id)).fetchone()
+        if not order:
+            await query.answer("فاکتور یافت نشد.", show_alert=True)
+            return
+        if order["status"] != "pending":
+            await query.answer("این سفارش قبلاً ثبت و ارسال شده است.", show_alert=True)
+            return
+        conn.execute("UPDATE ton_orders SET status='awaiting_admin' WHERE id=?", (order_id,))
+
+    await query.answer("✅ درخواست تایید پرداخت برای مدیریت ارسال شد!", show_alert=True)
+    await query.edit_message_text(
+        p_text(
+            f"✅ <b>درخواست تایید پرداخت فاکتور #{order_id} برای ادمین ارسال شد!</b>\n\n"
+            f"💎 تعداد: <b>{order['diamonds']:,} الماس</b>\n"
+            f"💰 مبلغ: <b>{order['ton_amount']} TON</b>\n\n"
+            f"⏳ به‌محض بررسی تراکنش و تایید توسط ادمین، الماس‌ها بلافاصله به حساب شما اضافه خواهند شد."
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=main_inline_keyboard(user.id)
     )
 
-    admin_caption = p_text(
-        f"🧾 <b>رسید جدید خرید اشتراک VIP (#{pay_id})</b>\n\n"
-        f"👤 کاربر: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
-        f"⚡ آیدی عددی: <code>{user.id}</code>\n"
-        f"💎 پلن درخواستی: <b>{plan['title']}</b> ({plan['days']} روز)\n"
-        f"💰 مبلغ: <b>{plan['amount']:,} تومان</b>"
+    # ارسال جزئیات کامل به ادمین برای تایید یا رد
+    admin_msg = p_text(
+        f"💎 <b>درخواست تایید پرداخت ارز دیجیتال TON (#{order_id})</b>\n\n"
+        f"👤 نام کاربر: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
+        f"🔢 آیدی عددی کاربر: <code>{user.id}</code>\n"
+        f"💎 تعداد الماس خریداری شده: <b>{order['diamonds']:,} الماس</b>\n"
+        f"💰 مبلغ پرداختی به تون: <code>{order['ton_amount']}</code> <b>TON</b>\n"
+        f"🏦 ولت مقصد: <code>{html.escape(order['wallet_address'])}</code>\n"
+        f"⏰ زمان ثبت: <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>"
     )
-    admin_kb = InlineKeyboardMarkup([
+    adm_kb = InlineKeyboardMarkup([
         [
-            p_btn("تایید و فعال‌سازی VIP", callback_data=f"payact:approve:{pay_id}", style="success", emoji_key="check"),
-            p_btn("رد کردن رسید", callback_data=f"payact:reject:{pay_id}", style="danger", emoji_key="fire"),
+            p_btn(f"تایید و شارژ {order['diamonds']} الماس", callback_data=f"tonadm:approve:{order_id}", style="success", emoji_key="check"),
+            p_btn("رد کردن پرداخت", callback_data=f"tonadm:reject:{order_id}", style="danger", emoji_key="fire"),
         ]
     ])
     for adm in ADMIN_IDS:
         try:
-            await context.bot.send_photo(
-                chat_id=adm,
-                photo=photo_id,
-                caption=admin_caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=admin_kb
-            )
+            await context.bot.send_message(chat_id=adm, text=admin_msg, parse_mode=ParseMode.HTML, reply_markup=adm_kb)
         except Exception as e:
-            logger.error(f"خطا در ارسال رسید به ادمین: {e}")
+            logger.error(f"خطا در ارسال فاکتور TON به ادمین: {e}")
 
-    context.user_data.pop("pending_vip_plan", None)
-    return ConversationHandler.END
-
-async def admin_payment_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_ton_order_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_admin(query.from_user.id):
-        await query.answer("⛔ فقط مدیر اصلی دسترسی دارد.", show_alert=True)
+        await query.answer("⛔ فقط ادمین اصلی دسترسی دارد!", show_alert=True)
         return
 
-    _, action, pay_id_str = query.data.split(":")
-    pay_id = int(pay_id_str)
+    _, action, order_id_str = query.data.split(":")
+    order_id = int(order_id_str)
 
     with closing(get_conn()) as conn, conn:
-        pay = conn.execute("SELECT * FROM payments WHERE id=?", (pay_id,)).fetchone()
-        if not pay:
-            await query.answer("رسید یافت نشد.", show_alert=True)
+        order = conn.execute("SELECT * FROM ton_orders WHERE id=?", (order_id,)).fetchone()
+        if not order:
+            await query.answer("سفارش یافت نشد.", show_alert=True)
             return
-        if pay["status"] != "pending":
-            await query.answer("این رسید قبلاً بررسی شده است.", show_alert=True)
+        if order["status"] in ("approved", "rejected"):
+            await query.answer("این سفارش قبلاً تعیین تکلیف شده است.", show_alert=True)
             return
 
         if action == "approve":
-            conn.execute("UPDATE payments SET status='approved' WHERE id=?", (pay_id,))
-            add_vip_days(pay["user_id"], pay["days"])
-            await query.answer("✅ اشتراک VIP برای کاربر فعال شد!")
+            conn.execute("UPDATE ton_orders SET status='approved' WHERE id=?", (order_id,))
+            add_user_diamonds(order["user_id"], order["diamonds"])
+            await query.answer(f"✅ تعداد {order['diamonds']} الماس به حساب کاربر اضافه شد!", show_alert=True)
             try:
                 await context.bot.send_message(
-                    chat_id=pay["user_id"],
+                    chat_id=order["user_id"],
                     text=p_text(
-                        f"🎉 <b>پرداخت شما تایید شد!</b>\n\n"
-                        f"💎 اشتراک <b>{pay['plan_type']}</b> ({pay['days']} روز) با موفقیت برای حساب شما فعال گردید.\n"
-                        f"🚀 اکنون می‌توانید به‌صورت نامحدود و بدون تبلیغ دکمه شیشه‌ای بسازید و از بخش ایموجی پریمیوم استفاده کنید!"
+                        f"🎉 <b>پرداخت TON شما تایید شد!</b>\n\n"
+                        f"💎 تعداد <b>{order['diamonds']:,} الماس</b> با موفقیت به حساب کاربری شما در <b>سلف دارک</b> اضافه گردید!"
                     ),
                     parse_mode=ParseMode.HTML,
-                    reply_markup=main_inline_keyboard(pay["user_id"])
+                    reply_markup=main_inline_keyboard(order["user_id"])
                 )
             except Exception:
                 pass
-            await query.edit_message_caption(
-                caption=p_text(f"{query.message.caption}\n\n✅ <b>وضعیت: تایید شده و اشتراک فعال شد.</b>"),
+            await query.edit_message_text(
+                p_text(f"{query.message.text}\n\n✅ <b>وضعیت: تایید شد و {order['diamonds']} الماس شارژ گردید.</b>"),
                 parse_mode=ParseMode.HTML
             )
         else:
-            conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (pay_id,))
-            await query.answer("❌ رسید رد شد.")
+            conn.execute("UPDATE ton_orders SET status='rejected' WHERE id=?", (order_id,))
+            await query.answer("❌ سفارش رد شد.", show_alert=True)
             try:
                 await context.bot.send_message(
-                    chat_id=pay["user_id"],
-                    text=p_text(f"❌ رسید پرداخت شماره #{pay_id} شما مورد تایید قرار نگرفت. در صورت ابهام دوباره بررسی نمایید."),
+                    chat_id=order["user_id"],
+                    text=p_text(f"❌ پرداخت فاکتور #{order_id} ({order['ton_amount']} TON) توسط مدیریت تایید نشد."),
                     parse_mode=ParseMode.HTML
                 )
             except Exception:
                 pass
-            await query.edit_message_caption(
-                caption=p_text(f"{query.message.caption}\n\n❌ <b>وضعیت: رد شده توسط مدیر.</b>"),
+            await query.edit_message_text(
+                p_text(f"{query.message.text}\n\n❌ <b>وضعیت: رد شده توسط ادمین.</b>"),
                 parse_mode=ParseMode.HTML
             )
 
 # ====================================================================
-#  پنل مدیریت پیشرفته با ۲۰ قابلیت کامل (مخصوص آیدی 8248647747)
+#  استفاده از کد هدیه الماس توسط کاربر
 # ====================================================================
 
-async def admin_home_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def gift_code_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not is_admin(query.from_user.id):
-        await query.answer("⛔ این بخش فقط مخصوص ادمین اصلی ربات است!", show_alert=True)
-        return
     await query.answer()
-    context.user_data.pop("adm_mode", None)
-
-    p30 = int(get_setting("price_30d", "50000"))
-    p90 = int(get_setting("price_90d", "199000"))
-    card = get_setting("card_number", "6037-9975-0000-0000")
-    holder = get_setting("card_holder", "مدیریت ربات")
-
-    text = p_text(
-        f"👑 <b>پنل مدیریت پیشرفته ربات (۲۰ قابلیت فعال)</b>\n\n"
-        f"💳 شماره کارت فعلی: <code>{card}</code> ({html.escape(holder)})\n"
-        f"💎 قیمت ۳۰ روزه: <b>{p30:,} تومان</b> | ۳ ماهه: <b>{p90:,} تومان</b>\n"
-        f"⚡ سقف روزانه عادی: <b>{get_setting('free_daily_limit')} پست</b> | بدون تبلیغ اولیه: <b>{get_setting('free_no_ads_days')} روز</b>\n\n"
-        f"✨ از دکمه‌های شیشه‌ای رنگی زیر عملیات مورد نظر را انتخاب کنید:"
+    await query.edit_message_text(
+        p_text("🎁 <b>لطفاً کد هدیه الماس خود را ارسال کنید:</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("menu:main")
     )
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
+    return GIFT_WAIT_CODE
+
+async def gift_code_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    code = update.message.text.strip()
+    with closing(get_conn()) as conn, conn:
+        g = conn.execute("SELECT * FROM gift_codes WHERE code=?", (code,)).fetchone()
+        if not g or g["used_count"] >= g["max_uses"]:
+            await update.message.reply_text(p_text("❌ کد هدیه نامعتبر است یا ظرفیت آن تمام شده است."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+            return ConversationHandler.END
+        already = conn.execute("SELECT 1 FROM gift_uses WHERE code=? AND user_id=?", (code, user.id)).fetchone()
+        if already:
+            await update.message.reply_text(p_text("⚠️ شما قبلاً از این کد هدیه استفاده کرده‌اید!"), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+            return ConversationHandler.END
+
+        conn.execute("INSERT INTO gift_uses (code, user_id) VALUES (?, ?)", (code, user.id))
+        conn.execute("UPDATE gift_codes SET used_count = used_count + 1 WHERE code=?", (code,))
+        conn.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (g["diamonds"], user.id))
+
+    await update.message.reply_text(
+        p_text(f"🎉 تبریک! کد هدیه اعمال شد و <b>{g['diamonds']} الماس</b> به حساب شما اضافه گردید! 💎"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
     return ConversationHandler.END
 
-async def admin_actions_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ====================================================================
+#  هندلرهای پنل مدیریت ۴۰ قابلیته (شامل فوروارد پیام کاربر و تغییر موجودی)
+# ====================================================================
+
+async def admin_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_admin(query.from_user.id):
-        await query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
+        await query.answer("⛔ فقط مدیر اصلی دسترسی دارد!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    context.user_data["adm_page"] = page
+
+    ton_rate = get_setting("ton_per_diamond", "0.0005")
+    ref_st = "🟢 روشن" if get_setting("referral_enabled", "1") == "1" else "🔴 خاموش"
+    ref_rw = get_setting("referral_reward", "5")
+
+    text = p_text(
+        f"👑 <b>پنل مدیریت جامع «سلف دارک | Self Dark» (۴۰ قابلیت)</b>\n\n"
+        f"💎 قیمت هر الماس: <b>{ton_rate} TON</b> | حداقل خرید: <b>{get_setting('min_buy_diamonds')} الماس</b>\n"
+        f"🎁 زیرمجموعه‌گیری: <b>{ref_st}</b> (پاداش: <b>{ref_rw} الماس</b>)\n"
+        f"🌑 سلف‌های روشن در لحظه: <b>{len(ACTIVE_SELF_CLIENTS)} اکانت</b>\n\n"
+        f"✨ صفحه {page + 1} از ۴ — یکی از قابلیت‌های زیر را انتخاب کنید:"
+    )
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+    return ConversationHandler.END
+
+async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("⛔ عدم دسترسی!", show_alert=True)
         return ConversationHandler.END
 
-    action = query.data
+    act = query.data
+    page = context.user_data.get("adm_page", 0)
+    back_kb = InlineKeyboardMarkup([[p_btn("بازگشت به پنل مدیریت", callback_data=f"admin:page:{page}", style="primary", emoji_key="crown")]])
     await query.answer()
 
-    if action == "adm:stats":
+    # ۱. آمار جامع
+    if act == "adm:1":
         with closing(get_conn()) as conn:
-            total_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
-            now_iso = datetime.now().isoformat()
-            vip_users = conn.execute("SELECT COUNT(*) c FROM users WHERE vip_until > ?", (now_iso,)).fetchone()["c"]
-            banned_users = conn.execute("SELECT COUNT(*) c FROM users WHERE is_banned=1").fetchone()["c"]
-            total_posts = conn.execute("SELECT COUNT(*) c FROM posts_log").fetchone()["c"]
-            pending_pays = conn.execute("SELECT COUNT(*) c FROM payments WHERE status='pending'").fetchone()["c"]
-            approved_sum = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='approved'").fetchone()["s"]
-            fch_count = conn.execute("SELECT COUNT(*) c FROM force_channels").fetchone()["c"]
-
-        stats_text = p_text(
-            f"📊 <b>آمار لحظه‌ای و جامع ربات</b>\n\n"
-            f"👥 کل کاربران ثبت‌نامی: <b>{total_users:,} نفر</b>\n"
-            f"💎 کاربران دارای اشتراک VIP فعال: <b>{vip_users:,} نفر</b>\n"
-            f"🚫 کاربران مسدود شده: <b>{banned_users:,} نفر</b>\n"
-            f"🎨 کل پست‌های ساخته شده: <b>{total_posts:,} پست</b>\n"
-            f"📢 تعداد کانال‌های جوین اجباری: <b>{fch_count} کانال</b>\n"
-            f"🧾 رسیدهای در انتظار تایید: <b>{pending_pays} رسید</b>\n"
-            f"💰 مجموع فروش تایید شده: <b>{approved_sum:,} تومان</b>"
-        )
-        await query.edit_message_text(
-            stats_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به پنل مدیریت", callback_data="admin:home", style="primary", emoji_key="crown")]])
-        )
-        return ConversationHandler.END
-
-    elif action == "adm:pending_pays":
-        with closing(get_conn()) as conn:
-            pays = conn.execute("SELECT * FROM payments WHERE status='pending' ORDER BY id DESC LIMIT 10").fetchall()
-        if not pays:
-            await query.edit_message_text(
-                p_text("✅ هیچ رسید پرداختی در انتظار بررسی نیست."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به پنل مدیریت", callback_data="admin:home", style="primary", emoji_key="crown")]])
-            )
-            return ConversationHandler.END
-
-        for p in pays:
-            cap = p_text(
-                f"🧾 <b>رسید #{p['id']}</b>\n"
-                f"👤 کاربر: <code>{p['user_id']}</code>\n"
-                f"💎 پلن: {p['plan_type']} ({p['days']} روز)\n"
-                f"💰 مبلغ: {p['amount']:,} تومان"
-            )
-            kb = InlineKeyboardMarkup([
-                [
-                    p_btn("تایید و فعال‌سازی", callback_data=f"payact:approve:{p['id']}", style="success", emoji_key="check"),
-                    p_btn("رد رسید", callback_data=f"payact:reject:{p['id']}", style="danger", emoji_key="fire"),
-                ]
-            ])
-            await context.bot.send_photo(chat_id=query.message.chat_id, photo=p["photo_file_id"], caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
-        return ConversationHandler.END
-
-    elif action == "adm:list_fch":
-        channels = get_force_channels()
-        if not channels:
-            text = p_text("📢 هیچ کانال جوین اجباری ثبت نشده است.")
-        else:
-            lines = [p_text("📢 <b>لیست کانال‌های جوین اجباری فعال:</b>\n")]
-            for idx, ch in enumerate(channels, 1):
-                lines.append(p_text(f"{idx}. <b>{html.escape(ch['title'])}</b> | شناسه: <code>{ch['channel_id']}</code>\n🔗 {ch['channel_link']}"))
-            text = "\n\n".join(lines)
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    p_btn("افزودن کانال جدید", callback_data="adm:add_fch", style="success", emoji_key="sparkles"),
-                    p_btn("حذف کانال", callback_data="adm:del_fch", style="danger", emoji_key="fire"),
-                ],
-                [p_btn("بازگشت به پنل مدیریت", callback_data="admin:home", style="primary", emoji_key="crown")]
-            ])
-        )
-        return ConversationHandler.END
-
-    elif action == "adm:del_fch":
-        channels = get_force_channels()
-        if not channels:
-            await query.edit_message_text(
-                p_text("⚠️ هیچ کانالی برای حذف وجود ندارد."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[p_btn("بازگشت به پنل مدیریت", callback_data="admin:home", style="primary", emoji_key="crown")]])
-            )
-            return ConversationHandler.END
-        rows = []
-        for ch in channels:
-            rows.append([p_btn(f"حذف {ch['title']} ({ch['channel_id']})", callback_data=f"rmfch:{ch['id']}", style="danger", emoji_key="fire")])
-        rows.append([p_btn("بازگشت به پنل مدیریت", callback_data="admin:home", style="primary", emoji_key="crown")])
-        await query.edit_message_text(p_text("🔥 روی کانالی که می‌خواهید از جوین اجباری حذف شود کلیک کنید:"), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
-        return ConversationHandler.END
-
-    elif action == "adm:toggle_bot":
-        curr = get_setting("bot_active", "1")
-        new_val = "0" if curr == "1" else "1"
-        set_setting("bot_active", new_val)
-        await admin_home_callback(update, context)
-        return ConversationHandler.END
-
-    elif action == "adm:add_fch":
+            u_cnt = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+            d_sum = conn.execute("SELECT COALESCE(SUM(diamonds),0) s FROM users").fetchone()["s"]
+            s_cnt = conn.execute("SELECT COUNT(*) c FROM self_accounts WHERE is_running=1").fetchone()["c"]
+            t_cnt = conn.execute("SELECT COUNT(*) c FROM tabchi_groups").fetchone()["c"]
+            o_pend = conn.execute("SELECT COUNT(*) c FROM ton_orders WHERE status IN ('pending','awaiting_admin')").fetchone()["c"]
+            o_app = conn.execute("SELECT COUNT(*) c FROM ton_orders WHERE status='approved'").fetchone()["c"]
         await query.edit_message_text(
             p_text(
-                "✨ <b>افزودن کانال جوین اجباری (مرحله ۱ از ۳)</b>\n\n"
-                "لطفاً آیدی کانال با @ (مثل <code>@MyChannel</code>) یا آیدی عددی کانال (مثل <code>-100123456789</code>) را بفرستید.\n"
-                "⚠️ <i>توجه: ربات حتماً باید در آن کانال ادمین باشد تا بتواند عضویت کاربران را بررسی کند.</i>"
+                f"📊 <b>آمار جامع ربات سلف دارک</b>\n\n"
+                f"👥 کل کاربران: <b>{u_cnt:,} نفر</b>\n"
+                f"💎 مجموع الماس موجود کاربران: <b>{d_sum:,} الماس</b>\n"
+                f"🌑 اکانت‌های سلف روشن در دیتابیس: <b>{s_cnt}</b> (متصل در حافظه: <b>{len(ACTIVE_SELF_CLIENTS)}</b>)\n"
+                f"📣 گروه‌های تبچی ثبت‌شده: <b>{t_cnt} گروه</b>\n"
+                f"🧾 فاکتورهای TON منتظر تایید: <b>{o_pend}</b> | تایید شده: <b>{o_app}</b>"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("admin:home")
+            reply_markup=back_kb
+        )
+        return ConversationHandler.END
+
+    # ۴. شناسایی کاربر با فوروارد پیام و کم/زیاد کردن الماس
+    elif act == "adm:4":
+        await query.edit_message_text(
+            p_text(
+                "🔍 <b>شناسایی کاربر با فوروارد پیام یا ارسال آیدی عددی</b>\n\n"
+                "✨ لطفاً یک پیام از کاربر مورد نظر به اینجا <b>فوروارد (Forward)</b> کنید (یا آیدی عددی/یوزرنیم او را بفرستید) تا مشخصات کامل او باز شود و بتوانید موجودی الماس او را کم یا زیاد کنید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_FORWARD_USER
+
+    # ۱۰. سفارشات TON منتظر تایید
+    elif act == "adm:10":
+        with closing(get_conn()) as conn:
+            orders = conn.execute("SELECT * FROM ton_orders WHERE status IN ('pending','awaiting_admin') ORDER BY id DESC LIMIT 10").fetchall()
+        if not orders:
+            await query.edit_message_text(p_text("✅ هیچ سفارش TON در انتظار تاییدی وجود ندارد."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+            return ConversationHandler.END
+        for o in orders:
+            kb = InlineKeyboardMarkup([
+                [
+                    p_btn(f"تایید ({o['diamonds']} الماس)", callback_data=f"tonadm:approve:{o['id']}", style="success", emoji_key="check"),
+                    p_btn("رد سفارش", callback_data=f"tonadm:reject:{o['id']}", style="danger", emoji_key="fire"),
+                ]
+            ])
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=p_text(
+                    f"🧾 <b>سفارش TON #{o['id']}</b>\n"
+                    f"👤 کاربر: <code>{o['user_id']}</code>\n"
+                    f"💎 الماس: <b>{o['diamonds']}</b> | مبلغ: <code>{o['ton_amount']}</code> TON"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb
+            )
+        return ConversationHandler.END
+
+    # ۱۲. روشن/خاموش کردن زیرمجموعه‌گیری
+    elif act == "adm:12":
+        curr = get_setting("referral_enabled", "1")
+        set_setting("referral_enabled", "0" if curr == "1" else "1")
+        st = "🟢 روشن شد" if curr == "0" else "🔴 خاموش شد"
+        await query.edit_message_text(p_text(f"✅ بخش زیرمجموعه‌گیری <b>{st}</b>."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۱۴. افزودن کانال جوین اجباری
+    elif act == "adm:14":
+        await query.edit_message_text(
+            p_text("➕ <b>افزودن کانال جوین اجباری (مرحله ۱ از ۳)</b>\nآیدی کانال با @ (مثل <code>@MyChannel</code>) یا آیدی عددی کانال را بفرستید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
         )
         return ADM_WAIT_FCH_ID
 
-    elif action == "adm:gift_vip":
+    # ۱۵. حذف کانال جوین اجباری
+    elif act == "adm:15":
+        chs = get_force_channels()
+        if not chs:
+            await query.edit_message_text(p_text("⚠️ کانالی ثبت نشده است."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+            return ConversationHandler.END
+        rows = [[p_btn(f"حذف {c['title']} ({c['channel_id']})", callback_data=f"rmfch:{c['id']}", style="danger", emoji_key="fire")] for c in chs]
+        rows.append([p_btn("بازگشت", callback_data=f"admin:page:{page}", style="primary")])
+        await query.edit_message_text(p_text("🗑 روی کانال مورد نظر برای حذف کلیک کنید:"), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+        return ConversationHandler.END
+
+    # ۱۶. لیست کانال‌های اجباری
+    elif act == "adm:16":
+        chs = get_force_channels()
+        if not chs:
+            txt = "📢 هیچ کانال جوین اجباری ثبت نشده است."
+        else:
+            txt = "📋 <b>کانال‌های جوین اجباری:</b>\n\n" + "\n".join([f"• <b>{html.escape(c['title'])}</b> (<code>{c['channel_id']}</code>) -> {c['channel_link']}" for c in chs])
+        await query.edit_message_text(p_text(txt), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۱۹. لیست اکانت‌های سلف روشن
+    elif act == "adm:19":
+        with closing(get_conn()) as conn:
+            accs = conn.execute("SELECT * FROM self_accounts WHERE is_running=1 LIMIT 30").fetchall()
+        if not accs:
+            txt = "🌑 هیچ اکانت سلفی در حال حاضر روشن نیست."
+        else:
+            lines = ["🌑 <b>لیست اکانت‌های سلف دارک فعال:</b>\n"]
+            for a in accs:
+                lines.append(f"• کاربر <code>{a['user_id']}</code> | شماره: <code>{a['phone']}</code> | پیام‌ها: {a['msg_counter']}")
+            txt = "\n".join(lines)
+        await query.edit_message_text(p_text(txt), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۲۱. راه‌اندازی مجدد همه سلف‌ها
+    elif act == "adm:21":
+        with closing(get_conn()) as conn:
+            accs = conn.execute("SELECT * FROM self_accounts WHERE is_running=1").fetchall()
+        ok = 0
+        for a in accs:
+            if await start_single_self_client(a["user_id"], a["session_string"]):
+                ok += 1
+        await query.edit_message_text(p_text(f"✅ تعداد <b>{ok} سلف دارک</b> با موفقیت راه‌اندازی مجدد شدند."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۲۶ و ۲۷. کدهای هدیه
+    elif act == "adm:26":
+        with closing(get_conn()) as conn, conn:
+            conn.execute("DELETE FROM gift_codes")
+        await query.edit_message_text(p_text("🗑 تمام کدهای هدیه حذف شدند."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    elif act == "adm:27":
+        with closing(get_conn()) as conn:
+            codes = conn.execute("SELECT * FROM gift_codes").fetchall()
+        if not codes:
+            txt = "🎁 هیچ کد هدیه‌ای وجود ندارد."
+        else:
+            txt = "🎁 <b>لیست کدهای هدیه:</b>\n\n" + "\n".join([f"• <code>{c['code']}</code> -> {c['diamonds']} الماس ({c['used_count']}/{c['max_uses']})" for c in codes])
+        await query.edit_message_text(p_text(txt), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۰. برترین زیرمجموعه‌گیرها
+    elif act == "adm:30":
+        with closing(get_conn()) as conn:
+            top_u = conn.execute("SELECT * FROM users ORDER BY referrals_count DESC LIMIT 10").fetchall()
+        lines = ["🏆 <b>۱۰ زیرمجموعه‌گیر برتر سلف دارک:</b>\n"]
+        for idx, u in enumerate(top_u, 1):
+            lines.append(f"{idx}. <code>{u['user_id']}</code> ({html.escape(u['first_name'] or '')}) -> <b>{u['referrals_count']} زیرمجموعه</b>")
+        await query.edit_message_text(p_text("\n".join(lines)), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۱. ثروتمندترین کاربران الماس
+    elif act == "adm:31":
+        with closing(get_conn()) as conn:
+            top_d = conn.execute("SELECT * FROM users ORDER BY diamonds DESC LIMIT 10").fetchall()
+        lines = ["💎 <b>۱۰ کاربر دارای بیشترین الماس:</b>\n"]
+        for idx, u in enumerate(top_d, 1):
+            lines.append(f"{idx}. <code>{u['user_id']}</code> ({html.escape(u['first_name'] or '')}) -> <b>{u['diamonds']} الماس</b>")
+        await query.edit_message_text(p_text("\n".join(lines)), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۲. لیست گروه‌های تبچی
+    elif act == "adm:32":
+        with closing(get_conn()) as conn:
+            grps = conn.execute("SELECT * FROM tabchi_groups LIMIT 25").fetchall()
+        if not grps:
+            txt = "📣 هیچ گروه تبچی ثبت نشده است."
+        else:
+            txt = "📣 <b>لیست گروه‌های تبچی ثبت‌شده:</b>\n\n" + "\n".join([f"• {html.escape(g['chat_title'])} (<code>{g['chat_id']}</code>) | کاربر: <code>{g['user_id']}</code>" for g in grps])
+        await query.edit_message_text(p_text(txt), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۳. روشن/خاموش کردن سراسری تبچی
+    elif act == "adm:33":
+        curr = get_setting("tabchi_global_enabled", "1")
+        set_setting("tabchi_global_enabled", "0" if curr == "1" else "1")
+        st = "🟢 روشن" if curr == "0" else "🔴 خاموش"
+        await query.edit_message_text(p_text(f"✅ وضعیت سراسری تبچی: <b>{st}</b>"), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۶. روشن/خاموش کردن ثبت سلف جدید
+    elif act == "adm:36":
+        curr = get_setting("self_new_login_enabled", "1")
+        set_setting("self_new_login_enabled", "0" if curr == "1" else "1")
+        st = "🟢 مجاز" if curr == "0" else "🔴 غیرمجاز"
+        await query.edit_message_text(p_text(f"✅ ثبت اکانت سلف جدید: <b>{st}</b>"), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۷. پاکسازی کش پیام‌ها
+    elif act == "adm:37":
+        with closing(get_conn()) as conn, conn:
+            conn.execute("DELETE FROM edited_cache")
+        await query.edit_message_text(p_text("🗑 کش پیام‌های حذف و ویرایش پاکسازی شد."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # ۳۸. ارسال فایل بکاپ دیتابیس
+    elif act == "adm:38":
+        if os.path.exists(DB_PATH):
+            with open(DB_PATH, "rb") as f:
+                await context.bot.send_document(chat_id=query.message.chat_id, document=f, caption=p_text("📦 فایل پشتیبان دیتابیس سلف دارک"), parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    # ۳۹. وضعیت سلامت سرور و پینگر Render
+    elif act == "adm:39":
+        up = int((datetime.now() - START_TIME).total_seconds())
         await query.edit_message_text(
             p_text(
-                "🎁 <b>اهدای اشتراک VIP به کاربر (مرحله ۱ از ۲)</b>\n\n"
-                "لطفاً <b>آیدی عددی کاربر</b> مورد نظر را ارسال کنید:"
+                f"⚡ <b>وضعیت سرور Render و پینگر ۵ دقیقه‌ای</b>\n\n"
+                f"🟢 وب‌سرور Flask: <b>فعال</b>\n"
+                f"📡 تعداد سیگنال‌های ضد خواب ارسال شده: <b>{PING_COUNTER} بار</b>\n"
+                f"⏱ آپتایم فعلی: <b>{up // 3600} ساعت و {(up % 3600) // 60} دقیقه</b>"
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("admin:home")
+            reply_markup=back_kb
         )
-        return ADM_WAIT_GIFT_UID
+        return ConversationHandler.END
 
+    # ۴۰. روشن/خاموش کردن کل ربات
+    elif act == "adm:40":
+        curr = get_setting("bot_active", "1")
+        set_setting("bot_active", "0" if curr == "1" else "1")
+        st = "🟢 روشن" if curr == "0" else "🔴 خاموش"
+        await query.edit_message_text(p_text(f"✅ وضعیت کلی ربات سلف دارک: <b>{st}</b>"), parse_mode=ParseMode.HTML, reply_markup=back_kb)
+        return ConversationHandler.END
+
+    # سایر قابلیت‌هایی که ورودی متنی می‌گیرند
     prompts = {
-        "adm:broadcast": p_text("📣 <b>ارسال پیام همگانی</b>\nلطفاً پیام خود (متن، عکس یا ویدیو) را بفرستید تا برای تمام کاربران ارسال شود:"),
-        "adm:fwbroadcast": p_text("🚀 <b>فوروارد همگانی</b>\nلطفاً پست مورد نظر خود را به اینجا فوروارد کنید تا با نام منبع برای همه کاربران فوروارد شود:"),
-        "adm:set_card": p_text(f"💳 <b>تنظیم شماره کارت</b>\nشماره کارت فعلی: <code>{get_setting('card_number')}</code>\nشماره کارت جدید را ارسال کنید:"),
-        "adm:set_holder": p_text(f"👤 <b>تنظیم نام صاحب کارت</b>\nنام فعلی: <b>{html.escape(get_setting('card_holder'))}</b>\nنام صاحب حساب جدید را بفرستید:"),
-        "adm:price_30": p_text(f"💵 <b>تغییر قیمت اشتراک VIP ۳۰ روزه</b>\nقیمت فعلی: <b>{int(get_setting('price_30d')):,} تومان</b>\nقیمت جدید را به تومان (فقط عدد انگلیسی) وارد کنید:"),
-        "adm:price_90": p_text(f"💰 <b>تغییر قیمت اشتراک VIP سه‌ماهه</b>\nقیمت فعلی: <b>{int(get_setting('price_90d')):,} تومان</b>\nقیمت جدید را به تومان (فقط عدد انگلیسی) وارد کنید:"),
-        "adm:revoke_vip": p_text("❌ <b>لغو اشتراک VIP کاربر</b>\nلطفاً آیدی عددی کاربری که می‌خواهید اشتراک VIP او لغو شود را بفرستید:"),
-        "adm:user_info": p_text("👤 <b>جستجوی اطلاعات کاربر</b>\nلطفاً آیدی عددی کاربر را ارسال کنید:"),
-        "adm:ban_toggle": p_text("🚫 <b>مسدود یا آزادسازی کاربر</b>\nلطفاً آیدی عددی کاربر را ارسال کنید تا وضعیت مسدودیت او تغییر کند:"),
-        "adm:set_limit": p_text(f"⚡ <b>تنظیم سقف روزانه اشتراک معمولی</b>\nمقدار فعلی: <b>{get_setting('free_daily_limit')} دکمه در روز</b>\nعدد جدید را وارد کنید:"),
-        "adm:set_noads": p_text(f"⏳ <b>تنظیم تعداد روزهای بدون تبلیغ اولیه</b>\nمقدار فعلی: <b>{get_setting('free_no_ads_days')} روز اول</b>\nعدد جدید را وارد کنید:"),
-        "adm:set_ref": p_text(f"👥 <b>تنظیم هدف زیرمجموعه‌گیری و روزهای پاداش</b>\nفرمت فعلی: <code>{get_setting('referral_target')}:{get_setting('referral_reward_days')}</code> (یعنی {get_setting('referral_target')} زیرمجموعه = {get_setting('referral_reward_days')} روز VIP)\nمقدار جدید را با فرمت <code>تعداد:روز</code> بفرستید (مثلاً <code>6:10</code>):"),
-        "adm:set_adsig": p_text(f"✨ <b>تنظیم متن تبلیغ زیر پست‌های عادی</b>\nمتن فعلی:\n<code>{html.escape(get_setting('ad_signature'))}</code>\n\nمتن جدید را بفرستید (می‌توانید از <code>{{bot_username}}</code> استفاده کنید):"),
+        "adm:2":  "📣 <b>ارسال پیام همگانی</b>\nپیام خود را بفرستید:",
+        "adm:3":  "🔄 <b>فوروارد همگانی</b>\nپیام خود را فوروارد کنید:",
+        "adm:5":  "➕ <b>افزایش الماس کاربر با آیدی</b>\nبا فرمت <code>USER_ID:AMOUNT</code> بفرستید (مثال: <code>12345678:50</code>):",
+        "adm:6":  "➖ <b>کسر الماس کاربر با آیدی</b>\nبا فرمت <code>USER_ID:AMOUNT</code> بفرستید (مثال: <code>12345678:20</code>):",
+        "adm:7":  f"🏦 <b>تنظیم آدرس ولت TON</b>\nآدرس فعلی:\n<code>{html.escape(get_setting('ton_wallet'))}</code>\nآدرس ولت جدید را بفرستید:",
+        "adm:8":  f"💎 <b>تنظیم قیمت هر ۱ الماس به TON</b>\nقیمت فعلی: <code>{get_setting('ton_per_diamond')}</code> TON\nمقدار اعشاری جدید را بفرستید (مثلاً <code>0.0005</code>):",
+        "adm:9":  f"🔢 <b>تنظیم حداقل خرید الماس</b>\nمقدار فعلی: <b>{get_setting('min_buy_diamonds')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:11": f"💳 <b>تنظیم آیدی پشتیبانی پرداخت ریالی</b>\nآیدی فعلی: {get_setting('rial_support_id')}\nآیدی جدید را با @ بفرستید:",
+        "adm:13": f"🎁 <b>تغییر پاداش الماس هر زیرمجموعه</b>\nمقدار فعلی: <b>{get_setting('referral_reward')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:17": f"⚡ <b>تغییر هزینه فعال‌سازی سلف دارک</b>\nمقدار فعلی: <b>{get_setting('activation_cost')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:18": f"⏳ <b>تغییر هزینه ساعتی روشن بودن سلف دارک</b>\nمقدار فعلی: <b>{get_setting('hourly_cost')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:20": "🔴 <b>قطع و توقف سلف کاربر</b>\nآیدی عددی کاربر را بفرستید:",
+        "adm:22": "🚫 <b>مسدود کردن کاربر (Ban)</b>\nآیدی عددی کاربر را بفرستید:",
+        "adm:23": "🟢 <b>رفع مسدودیت کاربر (Unban)</b>\nآیدی عددی کاربر را بفرستید:",
+        "adm:24": "🎉 <b>هدیه الماس همگانی به تمام کاربران</b>\nتعداد الماسی که به همه اضافه شود را بفرستید:",
+        "adm:25": "🎁 <b>ساخت کد هدیه الماس</b>\nبا فرمت <code>CODE:DIAMONDS:MAX_USES</code> بفرستید (مثال: <code>DARK50:50:10</code>):",
+        "adm:28": f"🌟 <b>تنظیم الماس هدیه خوش‌آمدگویی</b>\nمقدار فعلی: <b>{get_setting('welcome_bonus')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:29": f"📅 <b>تنظیم الماس هدیه روزانه</b>\nمقدار فعلی: <b>{get_setting('daily_gift_diamonds')} الماس</b>\nعدد جدید را بفرستید:",
+        "adm:34": "✉️ <b>ارسال پیام مستقیم به کاربر</b>\nبا فرمت <code>USER_ID:MESSAGE</code> بفرستید:",
+        "adm:35": "📚 <b>تنظیم متن تکمیلی انتهای راهنما</b>\nمتن جدید را بفرستید:",
     }
 
-    if action in prompts:
-        context.user_data["adm_mode"] = action
+    if act in prompts:
+        context.user_data["adm_act"] = act
         await query.edit_message_text(
-            prompts[action],
+            p_text(prompts[act]),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("admin:home")
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
         )
-        return ADM_WAIT_INPUT
+        return ADM_WAIT_GENERIC
 
+    return ConversationHandler.END
+
+# ---- شناسایی کاربر با فوروارد پیام و افزایش/کاهش الماس ----
+async def admin_receive_forwarded_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    page = context.user_data.get("adm_page", 0)
+    target_uid = None
+
+    # بررسی فوروارد در نسخه جدید PTB (forward_origin)
+    if getattr(msg, "forward_origin", None):
+        origin = msg.forward_origin
+        if hasattr(origin, "sender_user") and origin.sender_user:
+            target_uid = origin.sender_user.id
+
+    if not target_uid and msg.text:
+        t = msg.text.strip()
+        if t.isdigit():
+            target_uid = int(t)
+        elif t.startswith("@"):
+            with closing(get_conn()) as conn:
+                row = conn.execute("SELECT user_id FROM users WHERE LOWER(username)=?", (t[1:].lower(),)).fetchone()
+                if row:
+                    target_uid = row["user_id"]
+
+    if not target_uid:
+        await msg.reply_text(
+            p_text("⚠️ آیدی کاربر از پیام فوروارد شده قابل استخراج نبود (ممکن است فوروارد کاربر قفل باشد). لطفاً آیدی عددی یا @یوزرنیم او را بفرستید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_FORWARD_USER
+
+    u = get_or_create_user(target_uid)
+    acc = get_self_account(target_uid)
+    context.user_data["adm_target_uid"] = target_uid
+
+    info = p_text(
+        f"👤 <b>کاربر شناسایی شد!</b>\n\n"
+        f"🔢 آیدی عددی: <code>{target_uid}</code>\n"
+        f"👤 نام: <b>{html.escape(u['first_name'] or 'کاربر')}</b> (@{u['username'] or 'ندارد'})\n"
+        f"💎 موجودی فعلی الماس: <b>{u['diamonds']} الماس</b>\n"
+        f"👥 زیرمجموعه‌ها: <b>{u['referrals_count']} نفر</b>\n"
+        f"📱 شماره سلف دارک: <code>{acc['phone'] if acc else 'ندارد'}</code>\n\n"
+        f"👇 حالا <b>مقدار الماسی که می‌خواهید اضافه یا کم کنید</b> را بفرستید:\n"
+        f"• برای افزایش، عدد مثبت بفرستید (مثلاً <code>+50</code> یا <code>50</code>)\n"
+        f"• برای کاهش، عدد منفی بفرستید (مثلاً <code>-30</code>)"
+    )
+    await msg.reply_text(info, parse_mode=ParseMode.HTML, reply_markup=cancel_inline_keyboard(f"admin:page:{page}"))
+    return ADM_WAIT_FORWARD_AMOUNT
+
+async def admin_receive_forward_diamond_delta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    page = context.user_data.get("adm_page", 0)
+    target_uid = context.user_data.get("adm_target_uid")
+    try:
+        delta = int(txt)
+    except ValueError:
+        await update.message.reply_text(p_text("⚠️ لطفاً یک عدد صحیح (مثبت یا منفی) وارد کنید:"), parse_mode=ParseMode.HTML)
+        return ADM_WAIT_FORWARD_AMOUNT
+
+    add_user_diamonds(target_uid, delta)
+    u = get_or_create_user(target_uid)
+    action_word = f"+{delta} الماس اضافه شد" if delta >= 0 else f"{abs(delta)} الماس کسر شد"
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=p_text(f"💎 تغییر موجودی توسط مدیریت:\n<b>{action_word}</b>\n💰 موجودی جدید شما: <b>{u['diamonds']} الماس</b>"),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        p_text(f"✅ تغییر موجودی روی کاربر <code>{target_uid}</code> اعمال شد ({action_word}).\n💎 موجودی جدید کاربر: <b>{u['diamonds']} الماس</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(page)
+    )
+    return ConversationHandler.END
+
+# ---- مدیریت ورودی‌های متنی ادمین ----
+async def admin_handle_generic_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    act = context.user_data.get("adm_act")
+    page = context.user_data.get("adm_page", 0)
+    msg = update.message
+    txt = (msg.text or "").strip()
+
+    if act in ("adm:2", "adm:3"):
+        with closing(get_conn()) as conn:
+            users = conn.execute("SELECT user_id FROM users").fetchall()
+        sent, failed = 0, 0
+        st_msg = await msg.reply_text(p_text(f"⏳ در حال ارسال به {len(users)} کاربر..."), parse_mode=ParseMode.HTML)
+        for u in users:
+            try:
+                if act == "adm:3":
+                    await msg.forward(chat_id=u["user_id"])
+                else:
+                    await msg.copy(chat_id=u["user_id"])
+                sent += 1
+            except Exception:
+                failed += 1
+        await st_msg.edit_text(
+            p_text(f"✅ <b>ارسال همگانی کامل شد!</b>\n🟢 موفق: <b>{sent}</b> | 🔴 ناموفق: <b>{failed}</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_admin_keyboard(page)
+        )
+        return ConversationHandler.END
+
+    elif act in ("adm:5", "adm:6") and ":" in txt:
+        uid_s, amt_s = txt.split(":", 1)
+        if uid_s.strip().isdigit() and amt_s.strip().isdigit():
+            uid = int(uid_s.strip())
+            amt = int(amt_s.strip())
+            delta = amt if act == "adm:5" else -amt
+            get_or_create_user(uid)
+            add_user_diamonds(uid, delta)
+            await msg.reply_text(p_text(f"✅ تغییر الماس ({delta:+d}) برای کاربر <code>{uid}</code> انجام شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+            return ConversationHandler.END
+
+    elif act == "adm:7":
+        set_setting("ton_wallet", txt)
+        await msg.reply_text(p_text(f"✅ آدرس ولت TON ذخیره شد:\n<code>{html.escape(txt)}</code>"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:8":
+        try:
+            float(txt)
+            set_setting("ton_per_diamond", txt)
+            await msg.reply_text(p_text(f"✅ قیمت هر ۱ الماس به <b>{txt} TON</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        except ValueError:
+            await msg.reply_text(p_text("⚠️ عدد اعشاری معتبر وارد کنید."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:9" and txt.isdigit():
+        set_setting("min_buy_diamonds", txt)
+        await msg.reply_text(p_text(f"✅ حداقل خرید الماس روی <b>{txt}</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:11":
+        set_setting("rial_support_id", txt)
+        await msg.reply_text(p_text(f"✅ آیدی پشتیبانی ریالی به {html.escape(txt)} تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:13" and txt.isdigit():
+        set_setting("referral_reward", txt)
+        await msg.reply_text(p_text(f"✅ پاداش هر زیرمجموعه به <b>{txt} الماس</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:17" and txt.isdigit():
+        set_setting("activation_cost", txt)
+        await msg.reply_text(p_text(f"✅ هزینه فعال‌سازی سلف روی <b>{txt} الماس</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:18" and txt.isdigit():
+        set_setting("hourly_cost", txt)
+        await msg.reply_text(p_text(f"✅ هزینه ساعتی سلف روی <b>{txt} الماس</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:20" and txt.isdigit():
+        await stop_single_self_client(int(txt))
+        await msg.reply_text(p_text(f"🔴 سلف دارک کاربر <code>{txt}</code> متوقف شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act in ("adm:22", "adm:23") and txt.isdigit():
+        b_val = 1 if act == "adm:22" else 0
+        with closing(get_conn()) as conn, conn:
+            conn.execute("UPDATE users SET is_banned=? WHERE user_id=?", (b_val, int(txt)))
+        await msg.reply_text(p_text(f"✅ وضعیت مسدودیت کاربر <code>{txt}</code> تغییر کرد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:24" and txt.isdigit():
+        amt = int(txt)
+        with closing(get_conn()) as conn, conn:
+            conn.execute("UPDATE users SET diamonds = diamonds + ?", (amt,))
+        await msg.reply_text(p_text(f"🎉 تعداد <b>{amt} الماس همگانی</b> به تمام کاربران اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:25" and txt.count(":") == 2:
+        c_code, c_dia, c_max = [x.strip() for x in txt.split(":")]
+        if c_dia.isdigit() and c_max.isdigit():
+            with closing(get_conn()) as conn, conn:
+                conn.execute("INSERT OR REPLACE INTO gift_codes (code, diamonds, max_uses, used_count) VALUES (?, ?, ?, 0)", (c_code, int(c_dia), int(c_max)))
+            await msg.reply_text(p_text(f"🎁 کد هدیه <code>{c_code}</code> ({c_dia} الماس - {c_max} بار مصرف) ساخته شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+            return ConversationHandler.END
+
+    elif act == "adm:28" and txt.isdigit():
+        set_setting("welcome_bonus", txt)
+        await msg.reply_text(p_text(f"✅ هدیه خوش‌آمدگویی روی <b>{txt} الماس</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:29" and txt.isdigit():
+        set_setting("daily_gift_diamonds", txt)
+        await msg.reply_text(p_text(f"✅ هدیه روزانه روی <b>{txt} الماس</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    elif act == "adm:34" and ":" in txt:
+        uid_s, m_body = txt.split(":", 1)
+        if uid_s.strip().isdigit():
+            try:
+                await context.bot.send_message(chat_id=int(uid_s.strip()), text=p_text(f"✉️ <b>پیام از طرف مدیریت سلف دارک:</b>\n\n{html.escape(m_body.strip())}"), parse_mode=ParseMode.HTML)
+                await msg.reply_text(p_text("✅ پیام ارسال شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+            except Exception as e:
+                await msg.reply_text(p_text(f"❌ خطا در ارسال: {e}"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+            return ConversationHandler.END
+
+    elif act == "adm:35":
+        set_setting("help_extra_note", txt)
+        await msg.reply_text(p_text("✅ متن تکمیلی راهنما بروزرسانی شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+        return ConversationHandler.END
+
+    await msg.reply_text(p_text("⚠️ فرمت ورودی نامعتبر بود. به پنل مدیریت بازگشتید."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
     return ConversationHandler.END
 
 async def admin_remove_fch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1646,25 +2651,19 @@ async def admin_remove_fch_callback(update: Update, context: ContextTypes.DEFAUL
     fch_id = int(query.data.split(":")[1])
     with closing(get_conn()) as conn, conn:
         conn.execute("DELETE FROM force_channels WHERE id=?", (fch_id,))
-    await query.answer("✅ کانال از جوین اجباری حذف شد!", show_alert=True)
-    await admin_home_callback(update, context)
+    await query.answer("🗑 کانال از جوین اجباری حذف شد!", show_alert=True)
+    page = context.user_data.get("adm_page", 0)
+    query.data = f"admin:page:{page}"
+    await admin_page_callback(update, context)
 
 async def admin_add_fch_step1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_fch_id"] = update.message.text.strip()
-    await update.message.reply_text(
-        p_text("🔗 <b>مرحله ۲ از ۳: لینک عضویت کانال</b>\nلطفاً لینک کانال (مثلاً <code>https://t.me/MyChannel</code>) را بفرستید:"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("admin:home")
-    )
+    await update.message.reply_text(p_text("🔗 <b>مرحله ۲ از ۳: لینک عضویت کانال</b> را بفرستید:"), parse_mode=ParseMode.HTML)
     return ADM_WAIT_FCH_LINK
 
 async def admin_add_fch_step2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_fch_link"] = update.message.text.strip()
-    await update.message.reply_text(
-        p_text("🏷 <b>مرحله ۳ از ۳: عنوان دکمه کانال</b>\nنامی که روی دکمه شیشه‌ای جوین اجباری نمایش داده شود را بفرستید (مثلاً: کانال رسمی ما):"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_inline_keyboard("admin:home")
-    )
+    await update.message.reply_text(p_text("🏷 <b>مرحله ۳ از ۳: عنوان دکمه کانال</b> را بفرستید:"), parse_mode=ParseMode.HTML)
     return ADM_WAIT_FCH_TITLE
 
 async def admin_add_fch_step3(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1672,207 +2671,59 @@ async def admin_add_fch_step3(update: Update, context: ContextTypes.DEFAULT_TYPE
     ch_id = context.user_data.get("new_fch_id")
     ch_link = context.user_data.get("new_fch_link")
     with closing(get_conn()) as conn, conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO force_channels (channel_id, channel_link, title) VALUES (?, ?, ?)",
-            (ch_id, ch_link, title)
-        )
-    await update.message.reply_text(
-        p_text(f"✅ کانال <b>{html.escape(title)}</b> (<code>{ch_id}</code>) به لیست جوین اجباری اضافه شد!"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_inline_keyboard()
-    )
-    return ConversationHandler.END
-
-async def admin_gift_vip_step1(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        uid = int(update.message.text.strip())
-        context.user_data["gift_uid"] = uid
-        await update.message.reply_text(
-            p_text("⏳ <b>تعداد روز اشتراک VIP</b> که می‌خواهید به این کاربر اضافه شود را وارد کنید (مثلاً 30):"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("admin:home")
-        )
-        return ADM_WAIT_GIFT_DAYS
-    except ValueError:
-        await update.message.reply_text(p_text("⚠️ لطفاً فقط آیدی عددی معتبر وارد کنید:"), parse_mode=ParseMode.HTML, reply_markup=cancel_inline_keyboard("admin:home"))
-        return ADM_WAIT_GIFT_UID
-
-async def admin_gift_vip_step2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        days = int(update.message.text.strip())
-        uid = context.user_data.get("gift_uid")
-        get_or_create_user(uid)
-        add_vip_days(uid, days)
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=p_text(f"🎁 <b>هدیه مدیریت!</b>\nتعداد <b>{days} روز اشتراک VIP</b> توسط مدیریت ربات برای حساب شما فعال شد! 💎"),
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_inline_keyboard(uid)
-            )
-        except Exception:
-            pass
-        await update.message.reply_text(
-            p_text(f"✅ تعداد <b>{days} روز اشتراک VIP</b> برای کاربر <code>{uid}</code> فعال شد."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_inline_keyboard()
-        )
-        return ConversationHandler.END
-    except ValueError:
-        await update.message.reply_text(p_text("⚠️ عدد معتبر وارد کنید:"), parse_mode=ParseMode.HTML, reply_markup=cancel_inline_keyboard("admin:home"))
-        return ADM_WAIT_GIFT_DAYS
-
-async def admin_handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = context.user_data.get("adm_mode")
-    msg = update.message
-    txt = (msg.text or "").strip()
-
-    if mode in ("adm:broadcast", "adm:fwbroadcast"):
-        with closing(get_conn()) as conn:
-            users = conn.execute("SELECT user_id FROM users").fetchall()
-        sent = 0
-        failed = 0
-        status_msg = await msg.reply_text(p_text(f"⏳ در حال ارسال به {len(users)} کاربر..."), parse_mode=ParseMode.HTML)
-        for u in users:
-            try:
-                if mode == "adm:fwbroadcast":
-                    await msg.forward(chat_id=u["user_id"])
-                else:
-                    await msg.copy(chat_id=u["user_id"])
-                sent += 1
-            except Exception:
-                failed += 1
-        await status_msg.edit_text(
-            p_text(
-                f"✅ <b>عملیات همگانی به پایان رسید!</b>\n\n"
-                f"🟢 ارسال موفق: <b>{sent} نفر</b>\n"
-                f"🔴 ناموفق/بلاک: <b>{failed} نفر</b>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_inline_keyboard()
-        )
-        return ConversationHandler.END
-
-    elif mode == "adm:set_card":
-        set_setting("card_number", txt)
-        await msg.reply_text(p_text(f"✅ شماره کارت به <code>{html.escape(txt)}</code> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:set_holder":
-        set_setting("card_holder", txt)
-        await msg.reply_text(p_text(f"✅ نام صاحب کارت به <b>{html.escape(txt)}</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:price_30":
-        if txt.isdigit():
-            set_setting("price_30d", txt)
-            await msg.reply_text(p_text(f"✅ قیمت اشتراک ۳۰ روزه به <b>{int(txt):,} تومان</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ لطفاً فقط عدد انگلیسی وارد کنید."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:price_90":
-        if txt.isdigit():
-            set_setting("price_90d", txt)
-            await msg.reply_text(p_text(f"✅ قیمت اشتراک ۳ ماهه به <b>{int(txt):,} تومان</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ لطفاً فقط عدد انگلیسی وارد کنید."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:revoke_vip":
-        if txt.isdigit():
-            with closing(get_conn()) as conn, conn:
-                conn.execute("UPDATE users SET vip_until=NULL WHERE user_id=?", (int(txt),))
-            await msg.reply_text(p_text(f"✅ اشتراک VIP کاربر <code>{txt}</code> لغو شد."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ آیدی عددی نامعتبر است."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:user_info":
-        if txt.isdigit():
-            uid = int(txt)
-            with closing(get_conn()) as conn:
-                u = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
-            if not u:
-                await msg.reply_text(p_text("❌ کاربری با این آیدی یافت نشد."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-            else:
-                info = p_text(
-                    f"👤 <b>مشخصات کاربر <code>{uid}</code>:</b>\n\n"
-                    f"نام: <b>{html.escape(u['first_name'] or '')}</b> (@{u['username'] or 'ندارد'})\n"
-                    f"وضعیت VIP: <b>{get_vip_remaining_text(uid)}</b>\n"
-                    f"کل پست‌ها: <b>{u['total_posts']}</b> | زیرمجموعه: <b>{u['referrals_count']} نفر</b>\n"
-                    f"وضعیت مسدودیت: <b>{'🚫 مسدود' if u['is_banned'] else '🟢 آزاد'}</b>"
-                )
-                await msg.reply_text(info, parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ آیدی عددی نامعتبر است."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:ban_toggle":
-        if txt.isdigit():
-            uid = int(txt)
-            with closing(get_conn()) as conn, conn:
-                u = conn.execute("SELECT is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
-                if u:
-                    new_state = 0 if u["is_banned"] == 1 else 1
-                    conn.execute("UPDATE users SET is_banned=? WHERE user_id=?", (new_state, uid))
-                    st_str = "🚫 مسدود شد" if new_state == 1 else "🟢 آزاد شد"
-                    await msg.reply_text(p_text(f"✅ کاربر <code>{uid}</code> {st_str}."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-                else:
-                    await msg.reply_text(p_text("❌ کاربر یافت نشد."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ آیدی عددی نامعتبر است."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:set_limit":
-        if txt.isdigit():
-            set_setting("free_daily_limit", txt)
-            await msg.reply_text(p_text(f"✅ سقف روزانه اشتراک معمولی به <b>{txt} دکمه</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ عدد نامعتبر."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:set_noads":
-        if txt.isdigit():
-            set_setting("free_no_ads_days", txt)
-            await msg.reply_text(p_text(f"✅ مهلت بدون تبلیغ اولیه به <b>{txt} روز</b> تغییر یافت."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ عدد نامعتبر."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:set_ref":
-        if ":" in txt:
-            parts = txt.split(":")
-            if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-                set_setting("referral_target", parts[0].strip())
-                set_setting("referral_reward_days", parts[1].strip())
-                await msg.reply_text(
-                    p_text(f"✅ تنظیمات رفرال بروز شد: هر <b>{parts[0].strip()} زیرمجموعه = {parts[1].strip()} روز VIP</b>."),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=admin_inline_keyboard()
-                )
-            else:
-                await msg.reply_text(p_text("⚠️ فرمت نادرست است (مثال: 6:10)."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-        else:
-            await msg.reply_text(p_text("⚠️ فرمت نادرست است (مثال: 6:10)."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    elif mode == "adm:set_adsig":
-        set_setting("ad_signature", txt)
-        await msg.reply_text(p_text("✅ متن تبلیغ زیر پست بروزرسانی شد."), parse_mode=ParseMode.HTML, reply_markup=admin_inline_keyboard())
-
-    context.user_data.pop("adm_mode", None)
+        conn.execute("INSERT OR REPLACE INTO force_channels (channel_id, channel_link, title) VALUES (?, ?, ?)", (ch_id, ch_link, title))
+    page = context.user_data.get("adm_page", 0)
+    await update.message.reply_text(p_text(f"✅ کانال <b>{html.escape(title)}</b> اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
     return ConversationHandler.END
 
 # ====================================================================
-#  ثبت هندلرها و اجرای ربات + پینگر ضد خواب ۵ دقیقه‌ای Render
+#  بازیابی خودکار سلف‌های روشن هنگام بالا آمدن سرور Render
+# ====================================================================
+
+async def post_init_startup(application: Application):
+    global BOT_APP_REF
+    BOT_APP_REF = application
+
+    # راه‌اندازی مجدد تمام اکانت‌های سلف دارک که در دیتابیس روشن هستند
+    with closing(get_conn()) as conn:
+        running_accs = conn.execute("SELECT * FROM self_accounts WHERE is_running=1").fetchall()
+
+    for acc in running_accs:
+        await start_single_self_client(acc["user_id"], acc["session_string"])
+
+    # ثبت جاب‌های دوره‌ای در JobQueue
+    if application.job_queue:
+        application.job_queue.run_repeating(hourly_diamond_billing_job, interval=60, first=30)
+        application.job_queue.run_repeating(profile_and_tabchi_worker_job, interval=60, first=20)
+    else:
+        # در صورتی که job_queue نصب نبود، با تسک asyncio اجرا شود
+        async def fallback_loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await hourly_diamond_billing_job(application)
+                    await profile_and_tabchi_worker_job(application)
+                except Exception as e:
+                    logger.warning(f"Loop error: {e}")
+        asyncio.create_task(fallback_loop())
+
+# ====================================================================
+#  تابع اصلی اجرا (Main)
 # ====================================================================
 
 def main():
     init_db()
     start_render_keep_alive()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init_startup).build()
 
-    glass_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(create_btn_start, pattern="^menu:create_btn$")],
+    # ۱. مکالمه فعال‌سازی سلف دارک
+    self_login_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(activate_self_start, pattern="^menu:activate_self$")],
         states={
-            BTN_WAIT_POST: [MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL) & ~filters.COMMAND, create_btn_receive_post)],
-            BTN_WAIT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_btn_receive_url)],
-            BTN_WAIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_btn_receive_text)],
-            BTN_WAIT_COLOR: [CallbackQueryHandler(create_btn_receive_color, pattern="^btncolor:")],
-            BTN_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_btn_receive_channel)],
-            BTN_WAIT_CONFIRM: [CallbackQueryHandler(create_btn_publish_now, pattern="^publish_glass_post$")],
+            SELF_WAIT_PHONE: [MessageHandler((filters.CONTACT | filters.TEXT) & ~filters.COMMAND, activate_self_receive_phone)],
+            SELF_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_code)],
+            SELF_WAIT_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_2fa)],
         },
         fallbacks=[
             CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
@@ -1881,12 +2732,44 @@ def main():
         allow_reentry=True,
     )
 
-    emoji_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(premium_emoji_start, pattern="^menu:premium_emoji$")],
+    # ۲. مکالمه ویرایش مقدار قابلیت‌های سلف
+    feat_val_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(feature_set_val_start, pattern="^fsetval:")],
         states={
-            EMOJI_WAIT_POST: [MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, premium_emoji_receive_post)],
-            EMOJI_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, premium_emoji_receive_channel)],
-            EMOJI_WAIT_CONFIRM: [CallbackQueryHandler(premium_emoji_publish_now, pattern="^publish_emoji_post$")],
+            FEAT_WAIT_VAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, feature_set_val_save)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(self_features_callbacks, pattern="^self:features_page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۳. مکالمه تنظیمات تبچی هوشمند
+    tabchi_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(tabchi_edit_start, pattern="^tabchi_edit:"),
+            CallbackQueryHandler(tabchi_edit_start, pattern="^tabchi:set_all_banner$"),
+        ],
+        states={
+            TABCHI_WAIT_BANNER: [MessageHandler(filters.TEXT & ~filters.COMMAND, tabchi_save_banner)],
+            TABCHI_WAIT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, tabchi_save_interval)],
+            TABCHI_WAIT_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, tabchi_save_delay)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(tabchi_menu_callback, pattern="^menu:tabchi$|^tabchi:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۴. مکالمه خرید الماس با TON
+    buy_ton_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(buy_ton_start, pattern="^buy:ton$")],
+        states={
+            BUY_WAIT_DIAMOND_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_ton_receive_count)],
         },
         fallbacks=[
             CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
@@ -1895,10 +2778,11 @@ def main():
         allow_reentry=True,
     )
 
-    buy_vip_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(buy_plan_start, pattern="^buyplan:(30|90)$")],
+    # ۵. مکالمه ثبت کد هدیه
+    gift_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(gift_code_start, pattern="^enter_gift_code$")],
         states={
-            PAY_WAIT_RECEIPT: [MessageHandler(filters.PHOTO, buy_plan_receive_receipt)],
+            GIFT_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, gift_code_receive)],
         },
         fallbacks=[
             CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
@@ -1907,18 +2791,19 @@ def main():
         allow_reentry=True,
     )
 
+    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته
     admin_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_actions_router, pattern="^adm:")],
+        entry_points=[CallbackQueryHandler(admin_router_callback, pattern="^adm:")],
         states={
-            ADM_WAIT_INPUT: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_handle_single_input)],
+            ADM_WAIT_GENERIC: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_handle_generic_input)],
+            ADM_WAIT_FORWARD_USER: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_receive_forwarded_user)],
+            ADM_WAIT_FORWARD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receive_forward_diamond_delta)],
             ADM_WAIT_FCH_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step1)],
             ADM_WAIT_FCH_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step2)],
             ADM_WAIT_FCH_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step3)],
-            ADM_WAIT_GIFT_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_gift_vip_step1)],
-            ADM_WAIT_GIFT_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_gift_vip_step2)],
         },
         fallbacks=[
-            CallbackQueryHandler(admin_home_callback, pattern="^admin:home$"),
+            CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"),
             CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
             CommandHandler("start", start_cmd),
         ],
@@ -1926,18 +2811,25 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(glass_conv)
-    app.add_handler(emoji_conv)
-    app.add_handler(buy_vip_conv)
+    app.add_handler(self_login_conv)
+    app.add_handler(feat_val_conv)
+    app.add_handler(tabchi_conv)
+    app.add_handler(buy_ton_conv)
+    app.add_handler(gift_conv)
     app.add_handler(admin_conv)
 
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
-    app.add_handler(CallbackQueryHandler(admin_home_callback, pattern="^admin:home$"))
+    app.add_handler(CallbackQueryHandler(stop_self_now_callback, pattern="^self:stop_now$"))
+    app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|ftoggle:|fbulk:)"))
+    app.add_handler(CallbackQueryHandler(tabchi_menu_callback, pattern="^(menu:tabchi|tabchi:)"))
+    app.add_handler(CallbackQueryHandler(ton_paid_user_confirm_callback, pattern="^tonpaid:"))
+    app.add_handler(CallbackQueryHandler(admin_ton_order_action_callback, pattern="^tonadm:"))
+    app.add_handler(CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"))
     app.add_handler(CallbackQueryHandler(admin_remove_fch_callback, pattern="^rmfch:"))
-    app.add_handler(CallbackQueryHandler(admin_payment_action_callback, pattern="^payact:"))
-    app.add_handler(CallbackQueryHandler(menu_router_callback, pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(menu_router_callback, pattern="^(menu:|buy:rial)"))
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
 
-    logger.info("🚀 ربات سازنده دکمه شیشه‌ای رنگی و ایموجی پریمیوم متحرک آماده به کار است.")
+    logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۰ قابلیت سلف، تبچی هوشمند و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
