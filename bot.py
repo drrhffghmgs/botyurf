@@ -198,6 +198,13 @@ PREMIUM_EMOJI_MAP = {
     "⚠️": f'<tg-emoji emoji-id="{EMOJI_IDS["zap"]}">⚠️</tg-emoji>',
 }
 
+PERSIAN_DIGITS_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+def normalize_digits(text: str) -> str:
+    if not text:
+        return ""
+    return text.translate(PERSIAN_DIGITS_MAP)
+
 def p_text(text: str) -> str:
     if not text:
         return ""
@@ -223,7 +230,12 @@ def p_btn(
         kwargs["style"] = style
     if emoji_key and emoji_key in EMOJI_IDS:
         kwargs["icon_custom_emoji_id"] = EMOJI_IDS[emoji_key]
-    return InlineKeyboardButton(text, **kwargs)
+    try:
+        return InlineKeyboardButton(text, **kwargs)
+    except TypeError:
+        kwargs.pop("style", None)
+        kwargs.pop("icon_custom_emoji_id", None)
+        return InlineKeyboardButton(text, **kwargs)
 
 # ====================================================================
 #  فهرست کامل ۴۰ قابلیت سلف دارک (۳۰ قابلیت اصلی + ۱۰ قابلیت اضافه شده)
@@ -401,6 +413,12 @@ def init_db():
         }
         for k, v in default_settings.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+        # حذف هرگونه کانال جوین اجباری قبلی یا پیش‌فرض که ادمین اضافه نکرده است
+        fch_cleaned = conn.execute("SELECT value FROM settings WHERE key='force_channels_cleaned_v4'").fetchone()
+        if not fch_cleaned:
+            conn.execute("DELETE FROM force_channels")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_channels_cleaned_v4', '1')")
 
 def get_setting(key: str, default: str = "") -> str:
     with closing(get_conn()) as conn:
@@ -1717,8 +1735,13 @@ async def activate_self_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
 
+    try:
+        btn_contact = KeyboardButton("📱 ارسال شماره تلگرام من برای فعالسازی سلف دارک", request_contact=True, style="success")
+    except TypeError:
+        btn_contact = KeyboardButton("📱 ارسال شماره تلگرام من برای فعالسازی سلف دارک", request_contact=True)
+
     contact_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 ارسال شماره تلگرام من برای فعالسازی سلف دارک", request_contact=True, style="success")]],
+        [[btn_contact]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
@@ -1734,6 +1757,60 @@ async def activate_self_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     return SELF_WAIT_PHONE
 
+def build_code_entry_message(phone: str, entered_code: str = "") -> str:
+    slots = []
+    for i in range(5):
+        if i < len(entered_code):
+            slots.append(f"<b>{entered_code[i]}</b>")
+        else:
+            slots.append("▫️")
+    slots_display = "  ".join(slots)
+
+    return p_text(
+        f"✅ <b>کد ورود ۵ رقمی به تلگرام شما (<code>{html.escape(phone)}</code>) ارسال شد!</b>\n\n"
+        f"🔢 <b>بخش وارد کردن کد ورود سلف دارک:</b>\n"
+        f"┌──────────────────────┐\n"
+        f"      {slots_display}\n"
+        f"└──────────────────────┘\n\n"
+        f"✨ <b>روش ۱ (پیشنهادی و ضد مسدودی کد):</b>\n"
+        f"از دکمه‌های شیشه‌ای زیر، کد ۵ رقمی تلگرام را به ترتیب وارد کرده و دکمه <b>«✅ تایید کد و فعال‌سازی»</b> را بزنید.\n\n"
+        f"✍️ <b>روش ۲ (تایپ در چت):</b>\n"
+        f"می‌توانید کد ۵ رقمی را با خط تیره یا فاصله (مثلاً <code>1-2-3-4-5</code>) در همین چت تایپ و ارسال کنید:"
+    )
+
+def build_code_entry_keyboard(entered_code: str = "") -> InlineKeyboardMarkup:
+    shown = " ".join(list(entered_code)) if entered_code else "هنوز رقمی وارد نشده"
+    return InlineKeyboardMarkup([
+        [p_btn(f"🔢 کد وارد شده: {shown}", callback_data="noop", style="primary", emoji_key="sparkles")],
+        [
+            p_btn("1", callback_data="codepad:d:1", style="primary"),
+            p_btn("2", callback_data="codepad:d:2", style="primary"),
+            p_btn("3", callback_data="codepad:d:3", style="primary"),
+        ],
+        [
+            p_btn("4", callback_data="codepad:d:4", style="primary"),
+            p_btn("5", callback_data="codepad:d:5", style="primary"),
+            p_btn("6", callback_data="codepad:d:6", style="primary"),
+        ],
+        [
+            p_btn("7", callback_data="codepad:d:7", style="primary"),
+            p_btn("8", callback_data="codepad:d:8", style="primary"),
+            p_btn("9", callback_data="codepad:d:9", style="primary"),
+        ],
+        [
+            p_btn("⌫ حذف یکی", callback_data="codepad:back", style="danger"),
+            p_btn("0", callback_data="codepad:d:0", style="primary"),
+            p_btn("🗑 پاکسازی", callback_data="codepad:clear", style="danger"),
+        ],
+        [
+            p_btn("تایید کد و فعال‌سازی سلف دارک", callback_data="codepad:submit", style="success", emoji_key="check"),
+        ],
+        [
+            p_btn("ارسال مجدد کد ورود", callback_data="codepad:resend", style="primary", emoji_key="rocket"),
+            p_btn("انصراف و بازگشت", callback_data="menu:main", style="danger", emoji_key="fire"),
+        ],
+    ])
+
 async def activate_self_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
@@ -1742,19 +1819,34 @@ async def activate_self_receive_phone(update: Update, context: ContextTypes.DEFA
     if msg.contact and msg.contact.phone_number:
         phone = msg.contact.phone_number
     elif msg.text:
-        phone = msg.text.strip().replace(" ", "")
+        phone = msg.text.strip()
     else:
         await msg.reply_text(p_text("⚠️ لطفاً از دکمه ارسال شماره استفاده کنید:"), parse_mode=ParseMode.HTML)
         return SELF_WAIT_PHONE
 
-    if not phone.startswith("+"):
+    phone = normalize_digits(phone)
+    phone = re.sub(r"[^\d+]", "", phone)
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    elif phone.startswith("09") and len(phone) == 11:
+        phone = "+98" + phone[1:]
+    elif not phone.startswith("+"):
         phone = "+" + phone
 
-    wait_msg = await msg.reply_text(
-        p_text("⏳ در حال اتصال به سرور تلگرام و ارسال کد ورود برای اکانت شما..."),
+    # حذف کیبورد شماره با پیام جداگانه (توجه: پیام دارای ReplyKeyboardRemove نباید edit_text شود!)
+    await msg.reply_text(
+        p_text(f"⏳ در حال اتصال به سرور تلگرام و ارسال کد ورود به شماره <code>{html.escape(phone)}</code>..."),
         parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardRemove()
     )
+
+    # بستن کلاینت موقت قبلی در صورت وجود
+    old_pending = PENDING_LOGINS.pop(user.id, None)
+    if old_pending and old_pending.get("client"):
+        try:
+            await old_pending["client"].disconnect()
+        except Exception:
+            pass
 
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -1764,40 +1856,40 @@ async def activate_self_receive_phone(update: Update, context: ContextTypes.DEFA
             "client": client,
             "phone": phone,
             "phone_code_hash": sent_code.phone_code_hash,
+            "entered_code": "",
+            "awaiting_2fa": False,
         }
-        await wait_msg.edit_text(
-            p_text(
-                f"✅ <b>کد ورود ۵ رقمی به تلگرام شما ({phone}) ارسال شد!</b>\n\n"
-                f"⚠️ <b>نکته بسیار مهم:</b> برای اینکه تلگرام کد را مسدود نکند، لطفاً کد ۵ رقمی را با <b>فاصله</b> یا <b>خط تیره</b> بفرستید!\n"
-                f"📌 مثال: <code>1-2-3-4-5</code> یا <code>1 2 3 4 5</code>"
-            ),
+        # ارسال پیام جدید حاوی پنل شیشه‌ای وارد کردن کد ورود
+        await msg.reply_text(
+            build_code_entry_message(phone, ""),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("menu:main")
+            reply_markup=build_code_entry_keyboard("")
         )
         return SELF_WAIT_CODE
     except FloodWaitError as fw:
-        await wait_msg.edit_text(
+        await msg.reply_text(
             p_text(f"⛔ محدودیت موقت تلگرام! لطفاً {fw.seconds} ثانیه دیگر تلاش کنید."),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
         return ConversationHandler.END
     except Exception as e:
-        await wait_msg.edit_text(
-            p_text(f"❌ خطا در ارسال کد به شماره <code>{html.escape(phone)}</code>:\n<code>{html.escape(str(e)[:120])}</code>"),
+        await msg.reply_text(
+            p_text(f"❌ خطا در ارسال کد به شماره <code>{html.escape(phone)}</code>:\n<code>{html.escape(str(e)[:150])}</code>"),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
         return ConversationHandler.END
 
-async def activate_self_receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    raw_code = update.message.text.strip()
-    clean_code = re.sub(r"[^0-9]", "", raw_code)
-
+async def verify_and_sign_in_with_code(update: Update, context: ContextTypes.DEFAULT_TYPE, user, clean_code: str):
+    target_msg = update.effective_message
     login_info = PENDING_LOGINS.get(user.id)
     if not login_info:
-        await update.message.reply_text(p_text("❌ نشست ورود منقضی شده است. دوباره تلاش کنید."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        await target_msg.reply_text(
+            p_text("❌ نشست ورود منقضی شده است. لطفاً دوباره روی «فعالسازی سلف دارک» کلیک کنید."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
         return ConversationHandler.END
 
     client: TelegramClient = login_info["client"]
@@ -1808,24 +1900,29 @@ async def activate_self_receive_code(update: Update, context: ContextTypes.DEFAU
         await client.sign_in(phone=phone, code=clean_code, phone_code_hash=phone_code_hash)
         return await finalize_self_dark_login(update, context, user, client, phone)
     except SessionPasswordNeededError:
-        await update.message.reply_text(
-            p_text("🔐 <b>اکانت شما دارای رمز دو مرحله‌ای (Two-Step Verification) است.</b>\nلطفاً رمز دو مرحله‌ای اکانت خود را ارسال کنید:"),
+        login_info["awaiting_2fa"] = True
+        await target_msg.reply_text(
+            p_text(
+                "🔐 <b>اکانت شما دارای رمز دو مرحله‌ای (Two-Step Verification) است!</b>\n\n"
+                "👇 لطفاً رمز دو مرحله‌ای (گذرواژه ابری) اکانت تلگرام خود را در چت تایپ و ارسال کنید:"
+            ),
             parse_mode=ParseMode.HTML,
             reply_markup=cancel_inline_keyboard("menu:main")
         )
         return SELF_WAIT_2FA
     except PhoneCodeInvalidError:
-        await update.message.reply_text(
-            p_text("❌ کد وارد شده اشتباه است! لطفاً کد صحیح را با خط تیره (مثلاً <code>1-2-3-4-5</code>) بفرستید:"),
+        login_info["entered_code"] = ""
+        await target_msg.reply_text(
+            p_text("❌ <b>کد وارد شده اشتباه است!</b>\nلطفاً کد ۵ رقمی صحیح را از طریق کیبورد شیشه‌ای زیر یا با خط تیره (مثلاً <code>1-2-3-4-5</code>) وارد کنید:"),
             parse_mode=ParseMode.HTML,
-            reply_markup=cancel_inline_keyboard("menu:main")
+            reply_markup=build_code_entry_keyboard("")
         )
         return SELF_WAIT_CODE
     except PhoneCodeExpiredError:
         await client.disconnect()
         PENDING_LOGINS.pop(user.id, None)
-        await update.message.reply_text(
-            p_text("⏰ کد ورود منقضی شده است. لطفاً مجدداً فرآیند فعال‌سازی را شروع کنید."),
+        await target_msg.reply_text(
+            p_text("⏰ کد ورود منقضی شده است. لطفاً مجدداً دکمه «فعالسازی سلف دارک» را بزنید."),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
@@ -1833,12 +1930,114 @@ async def activate_self_receive_code(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         await client.disconnect()
         PENDING_LOGINS.pop(user.id, None)
-        await update.message.reply_text(
-            p_text(f"❌ خطا در ورود به اکانت:\n<code>{html.escape(str(e)[:120])}</code>"),
+        await target_msg.reply_text(
+            p_text(f"❌ خطا در ورود به اکانت:\n<code>{html.escape(str(e)[:140])}</code>"),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
         )
         return ConversationHandler.END
+
+async def activate_self_code_keypad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت دکمه‌های شیشه‌ای وارد کردن کد ۵ رقمی ورود سلف دارک"""
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+
+    login_info = PENDING_LOGINS.get(user.id)
+    if not login_info:
+        await query.answer("❌ نشست ورود منقضی شده است. مجدداً فعال‌سازی را شروع کنید.", show_alert=True)
+        return ConversationHandler.END
+
+    phone = login_info["phone"]
+    entered = login_info.get("entered_code", "")
+
+    if data.startswith("codepad:d:"):
+        digit = data.split(":")[2]
+        if len(entered) >= 5:
+            await query.answer("کد ۵ رقمی کامل است! روی «تایید کد و فعال‌سازی» بزنید.", show_alert=False)
+            return SELF_WAIT_CODE
+        entered += digit
+        login_info["entered_code"] = entered
+        await query.answer(f"رقم {digit} ثبت شد ({entered})")
+        try:
+            await query.edit_message_text(
+                build_code_entry_message(phone, entered),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_code_entry_keyboard(entered)
+            )
+        except Exception:
+            pass
+        # اگر ۵ رقم کامل شد، به صورت خودکار کد را بررسی و لاگین کن
+        if len(entered) == 5:
+            return await verify_and_sign_in_with_code(update, context, user, entered)
+        return SELF_WAIT_CODE
+
+    elif data == "codepad:back":
+        entered = entered[:-1]
+        login_info["entered_code"] = entered
+        await query.answer("آخرین رقم پاک شد")
+        try:
+            await query.edit_message_text(
+                build_code_entry_message(phone, entered),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_code_entry_keyboard(entered)
+            )
+        except Exception:
+            pass
+        return SELF_WAIT_CODE
+
+    elif data == "codepad:clear":
+        login_info["entered_code"] = ""
+        await query.answer("کد پاکسازی شد")
+        try:
+            await query.edit_message_text(
+                build_code_entry_message(phone, ""),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_code_entry_keyboard("")
+            )
+        except Exception:
+            pass
+        return SELF_WAIT_CODE
+
+    elif data == "codepad:resend":
+        client: TelegramClient = login_info["client"]
+        try:
+            sent_code = await client.send_code_request(phone)
+            login_info["phone_code_hash"] = sent_code.phone_code_hash
+            login_info["entered_code"] = ""
+            await query.answer("✅ کد ورود جدید به تلگرام شما ارسال شد!", show_alert=True)
+            await query.edit_message_text(
+                build_code_entry_message(phone, ""),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_code_entry_keyboard("")
+            )
+        except Exception as e:
+            await query.answer(f"⚠️ خطا در ارسال مجدد: {str(e)[:60]}", show_alert=True)
+        return SELF_WAIT_CODE
+
+    elif data == "codepad:submit":
+        if len(entered) < 5:
+            await query.answer("⚠️ لطفاً هر ۵ رقم کد ورود را وارد کنید!", show_alert=True)
+            return SELF_WAIT_CODE
+        await query.answer("⏳ در حال بررسی کد و فعال‌سازی سلف دارک...")
+        return await verify_and_sign_in_with_code(update, context, user, entered)
+
+    return SELF_WAIT_CODE
+
+async def activate_self_receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    raw_code = normalize_digits(update.message.text.strip())
+    clean_code = re.sub(r"[^0-9]", "", raw_code)
+
+    if not clean_code:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً کد ۵ رقمی را از طریق کیبورد شیشه‌ای بالا یا با خط تیره (مثلاً <code>1-2-3-4-5</code>) وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_code_entry_keyboard(PENDING_LOGINS.get(user.id, {}).get("entered_code", ""))
+        )
+        return SELF_WAIT_CODE
+
+    return await verify_and_sign_in_with_code(update, context, user, clean_code)
 
 async def activate_self_receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1886,8 +2085,9 @@ async def finalize_self_dark_login(update: Update, context: ContextTypes.DEFAULT
 
     await start_single_self_client(user.id, session_str)
 
+    target_msg = update.effective_message
     # ارسال پیام تبریک به کاربر
-    await update.message.reply_text(
+    await target_msg.reply_text(
         p_text(
             f"🎉 <b>تبریک! «سلف دارک | Self Dark» با موفقیت روی اکانت شما فعال شد!</b>\n\n"
             f"📱 شماره متصل: <code>{phone}</code>\n"
@@ -2711,19 +2911,41 @@ async def post_init_startup(application: Application):
 #  تابع اصلی اجرا (Main)
 # ====================================================================
 
+async def fallback_pending_login_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پشتیبان هوشمند: اگر کاربر خارج از وضعیت مکالمه کد ورود یا رمز 2FA خود را فرستاد، آن را پردازش کند"""
+    user = update.effective_user
+    if not user or user.id not in PENDING_LOGINS:
+        return
+    info = PENDING_LOGINS[user.id]
+    if info.get("awaiting_2fa"):
+        await activate_self_receive_2fa(update, context)
+    else:
+        await activate_self_receive_code(update, context)
+
 def main():
     init_db()
     start_render_keep_alive()
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_startup).build()
 
-    # ۱. مکالمه فعال‌سازی سلف دارک
+    # ۱. مکالمه فعال‌سازی سلف دارک (همراه با کیبورد شیشه‌ای کد ورود + پشتیبانی از ارسال متنی)
     self_login_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(activate_self_start, pattern="^menu:activate_self$")],
+        entry_points=[
+            CallbackQueryHandler(activate_self_start, pattern="^menu:activate_self$"),
+            MessageHandler(filters.CONTACT, activate_self_receive_phone),
+        ],
         states={
-            SELF_WAIT_PHONE: [MessageHandler((filters.CONTACT | filters.TEXT) & ~filters.COMMAND, activate_self_receive_phone)],
-            SELF_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_code)],
-            SELF_WAIT_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_2fa)],
+            SELF_WAIT_PHONE: [
+                MessageHandler((filters.CONTACT | filters.TEXT) & ~filters.COMMAND, activate_self_receive_phone)
+            ],
+            SELF_WAIT_CODE: [
+                CallbackQueryHandler(activate_self_code_keypad_callback, pattern="^codepad:"),
+                MessageHandler(filters.CONTACT, activate_self_receive_phone),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_code),
+            ],
+            SELF_WAIT_2FA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, activate_self_receive_2fa),
+            ],
         },
         fallbacks=[
             CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
@@ -2810,14 +3032,15 @@ def main():
         allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(self_login_conv)
     app.add_handler(feat_val_conv)
     app.add_handler(tabchi_conv)
     app.add_handler(buy_ton_conv)
     app.add_handler(gift_conv)
     app.add_handler(admin_conv)
+    app.add_handler(CommandHandler("start", start_cmd))
 
+    app.add_handler(CallbackQueryHandler(activate_self_code_keypad_callback, pattern="^codepad:"))
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(stop_self_now_callback, pattern="^self:stop_now$"))
     app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|ftoggle:|fbulk:)"))
@@ -2828,6 +3051,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_remove_fch_callback, pattern="^rmfch:"))
     app.add_handler(CallbackQueryHandler(menu_router_callback, pattern="^(menu:|buy:rial)"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_pending_login_text_handler))
 
     logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۰ قابلیت سلف، تبچی هوشمند و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
