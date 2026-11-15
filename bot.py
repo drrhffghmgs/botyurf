@@ -72,7 +72,7 @@ from telethon.errors import (
 #  تنظیمات اصلی ربات، توکن، API Hash و ادمین
 # ====================================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8649807066:AAGZlazLVFr-jWDz8BURuFSP2K7WNRmRh-4")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8315326974:AAFYg6ygEYi7V3tZzUFBzciADoi1d_1UQLo")
 ADMIN_ID = 8248647747
 ADMIN_IDS = [8248647747]
 
