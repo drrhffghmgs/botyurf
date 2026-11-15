@@ -69,7 +69,7 @@ from telethon.errors import (
 #  تنظیمات اصلی ربات، توکن، API Hash و ادمین
 # ====================================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8315326974:AAFYg6ygEYi7V3tZzUFBzciADoi1d_1UQLo")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8649807066:AAGZlazLVFr-jWDz8BURuFSP2K7WNRmRh-4")
 ADMIN_ID = 8248647747
 ADMIN_IDS = [8248647747]
 
@@ -1122,8 +1122,8 @@ ADMIN_40_ITEMS = [
     ("adm:21", "۲۱. راه‌اندازی مجدد همه سلف‌ها", "success"),
     ("adm:22", "۲۲. مسدود کردن کاربر (Ban)", "danger"),
     ("adm:23", "۲۳. رفع مسدودیت کاربر (Unban)", "success"),
-    ("adm:24", "۲۴. هدیه الماس همگانی به همه", "success"),
-    ("adm:25", "۲۵. ساخت کد هدیه الماس", "success"),
+    ("adm:24", "۲۴. الماس همگانی با متن دلخواه", "success"),
+    ("adm:25", "۲۵. ساخت کد هدیه الماس (مرحله‌ای)", "success"),
     ("adm:26", "۲۶. حذف کدهای هدیه", "danger"),
     ("adm:27", "۲۷. لیست کدهای هدیه فعال", "primary"),
     ("adm:28", "۲۸. تنظیم الماس خوش‌آمدگویی", "primary"),
@@ -1156,6 +1156,10 @@ def build_admin_keyboard(page: int = 0) -> InlineKeyboardMarkup:
         [
             p_btn("📦 بکاپ کامل ربات و کاربران", callback_data="adm:backup_all", style="success", emoji_key="gem"),
             p_btn("♻️ بازگردانی بکاپ (Restore)", callback_data="adm:restore_backup", style="primary", emoji_key="rocket"),
+        ],
+        [
+            p_btn("🎉 الماس همگانی با متن دلخواه", callback_data="adm:24", style="success", emoji_key="party"),
+            p_btn("🎁 ساخت کد هدیه مرحله‌ای", callback_data="adm:25", style="primary", emoji_key="gift"),
         ],
         [
             p_btn(tr_label, callback_data="adm:toggle_transfer", style=tr_style, emoji_key="sparkles"),
@@ -1205,7 +1209,12 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
     ADM_WAIT_RESTORE_FILE,
     TRANSFER_WAIT_TARGET_ID,
     TRANSFER_WAIT_AMOUNT,
-) = range(18)
+    ADM_WAIT_PUBLIC_DIAMOND_AMOUNT,
+    ADM_WAIT_PUBLIC_DIAMOND_TEXT,
+    ADM_WAIT_GIFT_WORD,
+    ADM_WAIT_GIFT_DIAMONDS,
+    ADM_WAIT_GIFT_CAPACITY,
+) = range(23)
 
 # ====================================================================
 #  هندلر شروع (/start) و منوهای اصلی سلف دارک
@@ -2426,23 +2435,59 @@ async def gift_code_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def gift_code_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    code = update.message.text.strip()
+    code_input = (update.message.text or "").strip()
     with closing(get_conn()) as conn, conn:
-        g = conn.execute("SELECT * FROM gift_codes WHERE code=?", (code,)).fetchone()
-        if not g or g["used_count"] >= g["max_uses"]:
-            await update.message.reply_text(p_text("❌ کد هدیه نامعتبر است یا ظرفیت آن تمام شده است."), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+        g = conn.execute("SELECT * FROM gift_codes WHERE LOWER(code)=LOWER(?)", (code_input,)).fetchone()
+        if not g:
+            await update.message.reply_text(
+                p_text("❌ کد هدیه وارد شده وجود ندارد یا پس از تکمیل ظرفیت منقضی شده است."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(user.id)
+            )
             return ConversationHandler.END
-        already = conn.execute("SELECT 1 FROM gift_uses WHERE code=? AND user_id=?", (code, user.id)).fetchone()
+
+        actual_code = g["code"]
+        if g["used_count"] >= g["max_uses"]:
+            conn.execute("DELETE FROM gift_codes WHERE code=?", (actual_code,))
+            await update.message.reply_text(
+                p_text("❌ ظرفیت استفاده از این کد هدیه تکمیل شده و کد به صورت خودکار منقضی گردیده است."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(user.id)
+            )
+            return ConversationHandler.END
+
+        already = conn.execute("SELECT 1 FROM gift_uses WHERE LOWER(code)=LOWER(?) AND user_id=?", (actual_code, user.id)).fetchone()
         if already:
-            await update.message.reply_text(p_text("⚠️ شما قبلاً از این کد هدیه استفاده کرده‌اید!"), parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
+            await update.message.reply_text(
+                p_text("⚠️ شما قبلاً از این کد هدیه استفاده کرده‌اید!"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(user.id)
+            )
             return ConversationHandler.END
 
-        conn.execute("INSERT INTO gift_uses (code, user_id) VALUES (?, ?)", (code, user.id))
-        conn.execute("UPDATE gift_codes SET used_count = used_count + 1 WHERE code=?", (code,))
-        conn.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (g["diamonds"], user.id))
+        new_used = g["used_count"] + 1
+        max_cap = g["max_uses"]
+        reward_diamonds = g["diamonds"]
 
+        conn.execute("INSERT INTO gift_uses (code, user_id) VALUES (?, ?)", (actual_code, user.id))
+        conn.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (reward_diamonds, user.id))
+
+        if new_used >= max_cap:
+            # به محض رسیدن به سقف ظرفیت (مثلاً ۵ یا ۱۰ نفر)، کد هدیه خودکار منقضی و حذف می‌شود
+            conn.execute("DELETE FROM gift_codes WHERE code=?", (actual_code,))
+            cap_note = f"🔒 ظرفیت این کد هدیه (<b>{max_cap} از {max_cap} نفر</b>) تکمیل شد و کد منقضی گردید."
+        else:
+            conn.execute("UPDATE gift_codes SET used_count = ? WHERE code=?", (new_used, actual_code))
+            cap_note = f"👥 ظرفیت باقی‌مانده کد: <b>{max_cap - new_used} نفر</b> (استفاده شده: {new_used}/{max_cap})"
+
+    updated_u = get_or_create_user(user.id)
     await update.message.reply_text(
-        p_text(f"🎉 تبریک! کد هدیه اعمال شد و <b>{g['diamonds']} الماس</b> به حساب شما اضافه گردید! 💎"),
+        p_text(
+            f"🎉 <b>تبریک! کد هدیه <code>{html.escape(actual_code)}</code> با موفقیت اعمال شد!</b>\n\n"
+            f"💎 مقدار هدیه: <b>+{reward_diamonds:,} الماس</b>\n"
+            f"💰 موجودی جدید شما: <b>{updated_u['diamonds']:,} الماس</b>\n"
+            f"{cap_note}"
+        ),
         parse_mode=ParseMode.HTML,
         reply_markup=main_inline_keyboard(user.id)
     )
@@ -2806,6 +2851,32 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(p_text(f"✅ تعداد <b>{ok} سلف دارک</b> با موفقیت راه‌اندازی مجدد شدند."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
         return ConversationHandler.END
 
+    # ۲۴. هدیه الماس همگانی با متن دلخواه (مرحله ۱ از ۲)
+    elif act == "adm:24":
+        await query.edit_message_text(
+            p_text(
+                "🎉 <b>هدیه الماس همگانی با متن دلخواه (مرحله ۱ از ۲: تعداد الماس)</b>\n\n"
+                "💎 لطفاً <b>تعداد الماسی</b> که می‌خواهید به حساب <b>تمام اعضای ربات</b> اضافه شود را به صورت عدد وارد کنید:\n"
+                "<i>(مثال: <code>20</code> یا <code>50</code>)</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_PUBLIC_DIAMOND_AMOUNT
+
+    # ۲۵. ساخت کد هدیه مرحله‌ای (مرحله ۱ از ۳: کلمه کد به انگلیسی)
+    elif act == "adm:25":
+        await query.edit_message_text(
+            p_text(
+                "🎁 <b>ساخت کد هدیه الماس (مرحله ۱ از ۳: کلمه کد هدیه)</b>\n\n"
+                "🔤 لطفاً <b>کلمه کد هدیه را به انگلیسی</b> وارد کنید:\n"
+                "<i>(مثال: <code>DARK50</code> یا <code>VIPGIFT</code>)</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_GIFT_WORD
+
     # ۲۶ و ۲۷. کدهای هدیه
     elif act == "adm:26":
         with closing(get_conn()) as conn, conn:
@@ -2817,9 +2888,11 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         with closing(get_conn()) as conn:
             codes = conn.execute("SELECT * FROM gift_codes").fetchall()
         if not codes:
-            txt = "🎁 هیچ کد هدیه‌ای وجود ندارد."
+            txt = "🎁 هیچ کد هدیه فعالی وجود ندارد."
         else:
-            txt = "🎁 <b>لیست کدهای هدیه:</b>\n\n" + "\n".join([f"• <code>{c['code']}</code> -> {c['diamonds']} الماس ({c['used_count']}/{c['max_uses']})" for c in codes])
+            txt = "🎁 <b>لیست کدهای هدیه فعال:</b>\n\n" + "\n".join(
+                [f"• کد: <code>{html.escape(c['code'])}</code> | هدیه: <b>{c['diamonds']} الماس</b> | ظرفیت: <b>{c['used_count']}/{c['max_uses']} نفر</b> (باقی‌مانده: {max(0, c['max_uses'] - c['used_count'])} نفر)" for c in codes]
+            )
         await query.edit_message_text(p_text(txt), parse_mode=ParseMode.HTML, reply_markup=back_kb)
         return ConversationHandler.END
 
@@ -2940,8 +3013,6 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "adm:20": "🔴 <b>قطع و توقف سلف کاربر</b>\nآیدی عددی کاربر را بفرستید:",
         "adm:22": "🚫 <b>مسدود کردن کاربر (Ban)</b>\nآیدی عددی کاربر را بفرستید:",
         "adm:23": "🟢 <b>رفع مسدودیت کاربر (Unban)</b>\nآیدی عددی کاربر را بفرستید:",
-        "adm:24": "🎉 <b>هدیه الماس همگانی به تمام کاربران</b>\nتعداد الماسی که به همه اضافه شود را بفرستید:",
-        "adm:25": "🎁 <b>ساخت کد هدیه الماس</b>\nبا فرمت <code>CODE:DIAMONDS:MAX_USES</code> بفرستید (مثال: <code>DARK50:50:10</code>):",
         "adm:28": f"🌟 <b>تنظیم الماس هدیه خوش‌آمدگویی</b>\nمقدار فعلی: <b>{get_setting('welcome_bonus')} الماس</b>\nعدد جدید را بفرستید:",
         "adm:29": f"📅 <b>تنظیم الماس هدیه روزانه</b>\nمقدار فعلی: <b>{get_setting('daily_gift_diamonds')} الماس</b>\nعدد جدید را بفرستید:",
         "adm:34": "✉️ <b>ارسال پیام مستقیم به کاربر</b>\nبا فرمت <code>USER_ID:MESSAGE</code> بفرستید:",
@@ -3128,21 +3199,6 @@ async def admin_handle_generic_input(update: Update, context: ContextTypes.DEFAU
         await msg.reply_text(p_text(f"✅ وضعیت مسدودیت کاربر <code>{txt}</code> تغییر کرد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
         return ConversationHandler.END
 
-    elif act == "adm:24" and txt.isdigit():
-        amt = int(txt)
-        with closing(get_conn()) as conn, conn:
-            conn.execute("UPDATE users SET diamonds = diamonds + ?", (amt,))
-        await msg.reply_text(p_text(f"🎉 تعداد <b>{amt} الماس همگانی</b> به تمام کاربران اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
-        return ConversationHandler.END
-
-    elif act == "adm:25" and txt.count(":") == 2:
-        c_code, c_dia, c_max = [x.strip() for x in txt.split(":")]
-        if c_dia.isdigit() and c_max.isdigit():
-            with closing(get_conn()) as conn, conn:
-                conn.execute("INSERT OR REPLACE INTO gift_codes (code, diamonds, max_uses, used_count) VALUES (?, ?, ?, 0)", (c_code, int(c_dia), int(c_max)))
-            await msg.reply_text(p_text(f"🎁 کد هدیه <code>{c_code}</code> ({c_dia} الماس - {c_max} بار مصرف) ساخته شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
-            return ConversationHandler.END
-
     elif act == "adm:28" and txt.isdigit():
         set_setting("welcome_bonus", txt)
         await msg.reply_text(p_text(f"✅ هدیه خوش‌آمدگویی روی <b>{txt} الماس</b> تنظیم شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
@@ -3212,6 +3268,180 @@ async def admin_add_fch_step3(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn.execute("INSERT OR REPLACE INTO force_channels (channel_id, channel_link, title) VALUES (?, ?, ?)", (ch_id, ch_link, title))
     page = context.user_data.get("adm_page", 0)
     await update.message.reply_text(p_text(f"✅ کانال <b>{html.escape(title)}</b> اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+    return ConversationHandler.END
+
+# ---- مراحل الماس همگانی با متن دلخواه (۲ مرحله‌ای) ----
+async def admin_public_diamond_step1_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get("adm_page", 0)
+    raw_num = normalize_digits((update.message.text or "").strip())
+    if not raw_num.isdigit() or int(raw_num) <= 0:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً یک عدد صحیح بزرگ‌تر از صفر برای تعداد الماس همگانی وارد کنید (مثلاً <code>25</code>):"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_PUBLIC_DIAMOND_AMOUNT
+
+    amt = int(raw_num)
+    context.user_data["pub_diamond_amt"] = amt
+    await update.message.reply_text(
+        p_text(
+            f"📝 <b>هدیه الماس همگانی با متن دلخواه (مرحله ۲ از ۲: متن پیام)</b>\n\n"
+            f"💎 تعداد الماس انتخابی برای هر نفر: <b>{amt:,} الماس</b>\n\n"
+            f"👇 حالا <b>متن دلخواه خود</b> را بفرستید تا به همراه اطلاعیه دریافت <b>{amt:,} الماس</b> برای تمام اعضای ربات ارسال شود:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+    )
+    return ADM_WAIT_PUBLIC_DIAMOND_TEXT
+
+async def admin_public_diamond_step2_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get("adm_page", 0)
+    amt = int(context.user_data.get("pub_diamond_amt", 0))
+    custom_text = (update.message.text or update.message.caption or "").strip()
+
+    if amt <= 0 or not custom_text:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً متن پیام دلخواه را ارسال کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_PUBLIC_DIAMOND_TEXT
+
+    with closing(get_conn()) as conn, conn:
+        conn.execute("UPDATE users SET diamonds = diamonds + ?", (amt,))
+        users = conn.execute("SELECT user_id, diamonds FROM users").fetchall()
+
+    st_msg = await update.message.reply_text(
+        p_text(f"⏳ در حال اهدای <b>{amt:,} الماس</b> و ارسال متن دلخواه شما به <b>{len(users):,} کاربر</b>..."),
+        parse_mode=ParseMode.HTML
+    )
+
+    sent, failed = 0, 0
+    for u in users:
+        try:
+            notify_txt = p_text(
+                f"🎉 <b>هدیه الماس همگانی از طرف مدیریت سلف دارک!</b>\n\n"
+                f"💬 <b>پیام مدیریت:</b>\n{html.escape(custom_text)}\n\n"
+                f"💎 مقدار هدیه اضافه شده: <b>+{amt:,} الماس</b>\n"
+                f"💰 موجودی جدید شما: <b>{u['diamonds']:,} الماس</b>"
+            )
+            await context.bot.send_message(
+                chat_id=u["user_id"],
+                text=notify_txt,
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_inline_keyboard(u["user_id"])
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    context.user_data.pop("pub_diamond_amt", None)
+    await st_msg.edit_text(
+        p_text(
+            f"✅ <b>الماس همگانی با متن دلخواه با موفقیت به کل اعضای ربات اهدا شد!</b>\n\n"
+            f"💎 مقدار اضافه شده به هر کاربر: <b>+{amt:,} الماس</b>\n"
+            f"👥 کل کاربران شارژ شده در دیتابیس: <b>{len(users):,} نفر</b>\n"
+            f"🟢 پیام ارسال‌شده موفق: <b>{sent:,} نفر</b> | 🔴 مسدود/ناموفق: <b>{failed:,} نفر</b>\n\n"
+            f"📝 <b>متن ارسال شده:</b>\n{html.escape(custom_text)}"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(page)
+    )
+    return ConversationHandler.END
+
+# ---- مراحل ساخت کد هدیه الماس (۳ مرحله‌ای: کلمه انگلیسی -> تعداد الماس -> ظرفیت استفاده) ----
+async def admin_gift_code_step1_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get("adm_page", 0)
+    word = (update.message.text or "").strip()
+
+    if not re.match(r"^[A-Za-z0-9_-]{2,40}$", word):
+        await update.message.reply_text(
+            p_text(
+                "⚠️ <b>کلمه کد هدیه باید به انگلیسی باشد!</b>\n"
+                "لطفاً فقط از حروف انگلیسی و اعداد (بدون فاصله) استفاده کنید (مثال: <code>DARK50</code> یا <code>GIFT100</code>):"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_GIFT_WORD
+
+    context.user_data["new_gift_word"] = word
+    await update.message.reply_text(
+        p_text(
+            f"💎 <b>ساخت کد هدیه الماس (مرحله ۲ از ۳: تعداد الماس هدیه)</b>\n\n"
+            f"🔤 کد انتخابی: <code>{html.escape(word)}</code>\n\n"
+            f"👇 حالا <b>تعداد الماس هدیه</b> که با زدن این کد به هر کاربر داده شود را به صورت عدد وارد کنید:\n"
+            f"<i>(مثال: <code>30</code> یا <code>100</code>)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+    )
+    return ADM_WAIT_GIFT_DIAMONDS
+
+async def admin_gift_code_step2_diamonds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get("adm_page", 0)
+    raw_dia = normalize_digits((update.message.text or "").strip())
+
+    if not raw_dia.isdigit() or int(raw_dia) <= 0:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً یک عدد صحیح بزرگ‌تر از صفر برای تعداد الماس هدیه وارد کنید (مثلاً <code>50</code>):"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_GIFT_DIAMONDS
+
+    diamonds = int(raw_dia)
+    context.user_data["new_gift_diamonds"] = diamonds
+    word = context.user_data.get("new_gift_word", "")
+
+    await update.message.reply_text(
+        p_text(
+            f"👥 <b>ساخت کد هدیه الماس (مرحله ۳ از ۳: ظرفیت کد هدیه)</b>\n\n"
+            f"🔤 کد هدیه: <code>{html.escape(word)}</code>\n"
+            f"💎 تعداد الماس هر نفر: <b>{diamonds:,} الماس</b>\n\n"
+            f"👇 حالا <b>ظرفیت کد هدیه</b> (تعداد نفراتی که می‌توانند از این کد استفاده کنند، مثلاً <code>5</code> یا <code>10</code> نفر) را وارد کنید تا پس از تکمیل ظرفیت، کد به صورت خودکار منقضی شود:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+    )
+    return ADM_WAIT_GIFT_CAPACITY
+
+async def admin_gift_code_step3_capacity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get("adm_page", 0)
+    raw_cap = normalize_digits((update.message.text or "").strip())
+
+    if not raw_cap.isdigit() or int(raw_cap) <= 0:
+        await update.message.reply_text(
+            p_text("⚠️ لطفاً یک عدد صحیح بزرگ‌تر از صفر برای ظرفیت نفرات وارد کنید (مثلاً <code>5</code> یا <code>10</code>):"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_GIFT_CAPACITY
+
+    capacity = int(raw_cap)
+    word = context.user_data.pop("new_gift_word", "")
+    diamonds = int(context.user_data.pop("new_gift_diamonds", 0))
+
+    with closing(get_conn()) as conn, conn:
+        conn.execute("DELETE FROM gift_uses WHERE LOWER(code)=LOWER(?)", (word,))
+        conn.execute("DELETE FROM gift_codes WHERE LOWER(code)=LOWER(?)", (word,))
+        conn.execute(
+            "INSERT INTO gift_codes (code, diamonds, max_uses, used_count) VALUES (?, ?, ?, 0)",
+            (word, diamonds, capacity)
+        )
+
+    await update.message.reply_text(
+        p_text(
+            f"🎁 <b>کد هدیه جدید با موفقیت ساخته و فعال شد!</b>\n\n"
+            f"🔤 کد هدیه: <code>{html.escape(word)}</code>\n"
+            f"💎 مقدار هدیه به هر نفر: <b>{diamonds:,} الماس</b>\n"
+            f"👥 ظرفیت کل استفاده: <b>{capacity} نفر</b>\n"
+            f"⏳ وضعیت انقضا: <b>به محض استفاده {capacity} نفر، به صورت خودکار منقضی و غیرفعال می‌شود.</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(page)
+    )
     return ConversationHandler.END
 
 async def send_full_backup_to_admin(chat_id: int, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
@@ -3524,7 +3754,7 @@ def main():
         allow_reentry=True,
     )
 
-    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ و مدیریت انتقال الماس)
+    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ، الماس همگانی با متن دلخواه و ساخت کد هدیه مرحله‌ای)
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_router_callback, pattern="^adm:")],
         states={
@@ -3535,6 +3765,11 @@ def main():
             ADM_WAIT_FCH_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step2)],
             ADM_WAIT_FCH_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step3)],
             ADM_WAIT_RESTORE_FILE: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_receive_restore_file)],
+            ADM_WAIT_PUBLIC_DIAMOND_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_public_diamond_step1_amount)],
+            ADM_WAIT_PUBLIC_DIAMOND_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_public_diamond_step2_text)],
+            ADM_WAIT_GIFT_WORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_gift_code_step1_word)],
+            ADM_WAIT_GIFT_DIAMONDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_gift_code_step2_diamonds)],
+            ADM_WAIT_GIFT_CAPACITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_gift_code_step3_capacity)],
         },
         fallbacks=[
             CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"),
