@@ -31,8 +31,10 @@ import html
 import asyncio
 import threading
 import requests
+import io
+import tempfile
 from flask import Flask, jsonify
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import closing
 
 from telegram import (
@@ -67,7 +69,7 @@ from telethon.errors import (
 #  تنظیمات اصلی ربات، توکن، API Hash و ادمین
 # ====================================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8315326974:AAFYg6ygEYi7V3tZzUFBzciADoi1d_1UQLo")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8649807066:AAGZlazLVFr-jWDz8BURuFSP2K7WNRmRh-4")
 ADMIN_ID = 8248647747
 ADMIN_IDS = [8248647747]
 
@@ -85,6 +87,8 @@ logger = logging.getLogger(__name__)
 # نگهداری کلاینت‌های فعال Telethon در حافظه
 ACTIVE_SELF_CLIENTS: dict[int, TelegramClient] = {}
 PENDING_LOGINS: dict[int, dict] = {}
+LAST_CLOCK_MINUTE: dict[int, str] = {}
+AUTOREPLY_COOLDOWN: dict[tuple[int, int], float] = {}
 BOT_APP_REF: Application = None
 
 # ====================================================================
@@ -242,18 +246,18 @@ def p_btn(
 # ====================================================================
 
 SELF_DARK_FEATURES = {
-    "f1":  {"title": "۱. پاسخگویی خودکار هوشمند", "type": "toggle_val", "val_key": "autoreply_text", "val_label": "متن پاسخ خودکار", "default_val": "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ می‌دهم. 🌑"},
+    "f1":  {"title": "۱. پاسخگویی خودکار هوشمند (فقط پیوی اکانت‌ها)", "type": "toggle_val", "val_key": "autoreply_text", "val_label": "متن پاسخ خودکار (فقط به اکانت‌های واقعی، نه ربات‌ها)", "default_val": "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ می‌دهم. 🌑"},
     "f2":  {"title": "۲. دستیار هوش مصنوعی", "type": "toggle", "desc": "پاسخ به سوالات با دستور .ai در چت‌ها"},
-    "f3":  {"title": "۳. تغییر خودکار بیوگرافی", "type": "toggle_val", "val_key": "bio_template", "val_label": "قالب بیوگرافی (با {time})", "default_val": "🌑 Self Dark | ⏰ {time}"},
-    "f4":  {"title": "۴. تغییر خودکار نام اکانت", "type": "toggle", "desc": "افزودن ساعت زنده کنار نام اکانت تلگرام هر دقیقه"},
+    "f3":  {"title": "۳. تغییر خودکار بیوگرافی با ساعت", "type": "toggle_val", "val_key": "bio_template", "val_label": "قالب بیوگرافی (با {time})", "default_val": "🌑 Self Dark | ⏰ {time}"},
+    "f4":  {"title": "۴. ساعت زنده در نام و نام خانوادگی پروفایل (دقیق هر دقیقه)", "type": "toggle_val", "val_key": "name_clock_tpl", "val_label": "ساعت فعلی گوشی شما (مثلاً 14:30) یا قالب نام خانوادگی با {time}", "default_val": "| {time}"},
     "f5":  {"title": "۵. زمان‌بندی تغییر پروفایل", "type": "toggle", "desc": "بروزرسانی زمان‌بندی شده اطلاعات پروفایل"},
     "f6":  {"title": "۶. مدیریت وضعیت اکانت (آنلاین دائمی)", "type": "toggle", "desc": "نگه داشتن وضعیت اکانت در حالت Online"},
     "f7":  {"title": "۷. ترجمه خودکار پیام‌ها", "type": "toggle", "desc": "ترجمه سریع با ریپلای دستور .tr روی پیام"},
     "f8":  {"title": "۸. تبدیل ویس به متن", "type": "toggle", "desc": "تبدیل پیام صوتی به متن با دستور .v2t"},
     "f9":  {"title": "۹. خلاصه‌سازی پیام‌های طولانی", "type": "toggle", "desc": "خلاصه‌سازی متن‌های طولانی با ریپلای .sum"},
-    "f10": {"title": "۱۰. دسته‌بندی هوشمند پیام‌ها", "type": "toggle", "desc": "برچسب‌گذاری پیام‌های مهم در Saved Messages"},
-    "f11": {"title": "۱۱. ذخیره پیام‌های حذف‌شده (Anti-Delete)", "type": "toggle", "desc": "ارسال فوری پیام‌های حذف‌شده کاربران به پیوی شما"},
-    "f12": {"title": "۱۲. ذخیره تاریخچه ویرایش پیام‌ها (Anti-Edit)", "type": "toggle", "desc": "ارسال متن قبل و بعد از ویرایش پیام‌ها به پیوی"},
+    "f10": {"title": "۱۰. دسته‌بندی هوشمند پیام‌ها", "type": "toggle", "desc": "دسته‌بندی گفتگوهای کاربر"},
+    "f11": {"title": "۱۱. ذخیره پیام‌های حذف‌شده (بدون ارسال در Saved)", "type": "toggle", "desc": "ذخیره بی‌صدا در دیتابیس و مشاهده با دستور .حذفیات"},
+    "f12": {"title": "۱۲. ذخیره تاریخچه ویرایش پیام‌ها (بدون ارسال در Saved)", "type": "toggle", "desc": "ذخیره بی‌صدا در دیتابیس و مشاهده با دستور .ویرایشها"},
     "f13": {"title": "۱۳. پشتیبان‌گیری از گفتگوها", "type": "toggle", "desc": "تهیه نسخه پشتیبان از پیام‌های چت با دستور .backup"},
     "f14": {"title": "۱۴. جستجوی پیشرفته پیام‌ها", "type": "toggle", "desc": "جستجوی سریع در کل چت با دستور .find"},
     "f15": {"title": "۱۵. بایگانی خودکار گفتگوها", "type": "toggle", "desc": "آرشیو کردن چت‌های بی‌صدا و غیرفعال"},
@@ -265,30 +269,34 @@ SELF_DARK_FEATURES = {
     "f21": {"title": "۲۱. پاسخ با سبک دلخواه (فونت/بولد)", "type": "toggle_val", "val_key": "text_style", "val_label": "سبک نوشتار (bold / italic / mono / normal)", "default_val": "bold"},
     "f22": {"title": "۲۲. حافظه اختصاصی هوش مصنوعی", "type": "toggle", "desc": "نگهداری زمینه مکالمه در پاسخ‌های هوشمند"},
     "f23": {"title": "۲۳. پیشنهاد خودکار استیکر", "type": "toggle", "desc": "واکنش استیکری خودکار به کلمات خاص"},
-    "f24": {"title": "۲۴. پیشنهاد هوشمند شکلک (ری‌اکشن خودکار)", "type": "toggle_val", "val_key": "auto_react_emoji", "val_label": "ایموجی ری‌اکشن خودکار", "default_val": "🔥"},
+    "f24": {"title": "۲۴. پیشنهاد هوشمند شکلک (ری‌اکشن خودکار پیوی)", "type": "toggle_val", "val_key": "auto_react_emoji", "val_label": "ایموجی ری‌اکشن خودکار", "default_val": "🔥"},
     "f25": {"title": "۲۵. ساخت دستورات شخصی", "type": "toggle_val", "val_key": "custom_cmd", "val_label": "دستور شخصی (فرمت کلید=پاسخ)", "default_val": ".salam=علیکم السلام عزیز 🌹"},
     "f26": {"title": "۲۶. دفترچه یادداشت خصوصی", "type": "toggle", "desc": "مدیریت دفترچه یادداشت با دستور .notebook"},
-    "f27": {"title": "۲۷. گزارش فعالیت روزانه", "type": "toggle", "desc": "ارسال گزارش عملکرد روزانه سلف دارک به Saved Messages"},
+    "f27": {"title": "۲۷. گزارش فعالیت روزانه", "type": "toggle", "desc": "مشاهده گزارش عملکرد با دستور .report"},
     "f28": {"title": "۲۸. آمار گفتگوها و پیام‌ها", "type": "toggle", "desc": "دریافت آمار دقیق اکانت با دستور .stats"},
     "f29": {"title": "۲۹. ارسال زمان‌بندی‌شده پیام‌ها", "type": "toggle", "desc": "ارسال پیام تاخیری با دستور .later"},
     "f30": {"title": "۳۰. مدیریت هوشمند اعلان‌ها", "type": "toggle", "desc": "فیلتر کردن اعلان‌های مزاحم و تبلیغاتی"},
     # ۱۰ قابلیت اضافه شده اختصاصی سلف دارک
     "f31": {"title": "۳۱. حالت روح (سین بدون تیک دوم)", "type": "toggle", "desc": "عدم ارسال تیک دوم خوانده شدن در پیوی‌ها"},
     "f32": {"title": "۳۲. تایپینگ و اکشن دائمی (Auto Action)", "type": "toggle_val", "val_key": "chat_action", "val_label": "نوع اکشن (typing / game / voice)", "default_val": "typing"},
-    "f33": {"title": "۳۳. دانلود خودکار مدیاهای تایمردار", "type": "toggle", "desc": "ذخیره خودکار عکس و ویدیوهای نابودشونده در Saved Messages"},
+    "f33": {"title": "۳۳. دانلود مدیاهای تایمردار", "type": "toggle", "desc": "قابلیت مدیریت مدیاهای تایمردار"},
     "f34": {"title": "۳۴. ضد لینک و ضد اسپم پیوی", "type": "toggle", "desc": "حذف خودکار لینک‌های تبلیغاتی در پیوی"},
     "f35": {"title": "۳۵. قفل پیوی (منشی هوشمند)", "type": "toggle", "desc": "محدود کردن پیام‌های افراد ناشناس در زمان شلوغی"},
     "f36": {"title": "۳۶. خوش‌آمدگویی خودکار در گروه‌ها", "type": "toggle_val", "val_key": "welcome_text", "val_label": "متن خوش‌آمدگویی گروه", "default_val": "خوش آمدی عزیز به گروه! 🌺"},
     "f37": {"title": "۳۷. ماشین‌حساب سریع در چت", "type": "toggle", "desc": "محاسبه عبارات ریاضی با دستور .calc"},
     "f38": {"title": "۳۸. ساخت فونت انگلیسی و فارسی", "type": "toggle", "desc": "زیباسازی متن با دستور .font"},
-    "f39": {"title": "۳۹. شکارچی تگ و منشن (Mention Logger)", "type": "toggle", "desc": "ارسال لینک پیام‌هایی که در گروه‌ها ریپلای یا تگ می‌شوید به پیوی"},
+    "f39": {"title": "۳۹. شکارچی تگ و منشن", "type": "toggle", "desc": "ثبت منشن‌های گروه بدون ارسال پیام مزاحم در Saved Messages"},
     "f40": {"title": "۴۰. پاکسازی سریع پیام‌ها (Purge)", "type": "toggle", "desc": "حذف سریع پیام‌های چت با دستور .del"},
 }
 
 def get_default_features_dict() -> dict:
-    data = {"tabchi_enabled": True}
+    data = {
+        "tabchi_enabled": True,
+        "clock_offset_mins": 210,  # پیش‌فرض +03:30 به وقت ایران (قابل تنظیم دقیق با ساعت دستگاه هر کاربر)
+        "name_clock_tpl": "| {time}",
+    }
     for k, meta in SELF_DARK_FEATURES.items():
-        data[k] = True if k in ("f11", "f12", "f19", "f28", "f37") else False
+        data[k] = True if k in ("f19", "f28", "f37") else False
         if "val_key" in meta:
             data[meta["val_key"]] = meta["default_val"]
     return data
@@ -409,6 +417,8 @@ def init_db():
             "bot_active": "1",
             "self_new_login_enabled": "1",
             "tabchi_global_enabled": "1",
+            "transfer_enabled": "1",
+            "min_transfer_diamonds": "50",
             "help_extra_note": "🌟 به راهنمای جامع سلف دارک خوش آمدید.",
         }
         for k, v in default_settings.items():
@@ -554,6 +564,75 @@ FONT_MAP = str.maketrans(
     "𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵"
 )
 
+CLOCK_FANCY_MAP = str.maketrans("0123456789", "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵")
+
+def compute_offset_mins_from_hhmm(hh: int, mm: int) -> int:
+    """محاسبه اختلاف دقیق دقیقه ساعت دستگاه کاربر با ساعت جهانی UTC"""
+    utc_now = datetime.now(timezone.utc)
+    utc_total = utc_now.hour * 60 + utc_now.minute
+    user_total = (hh % 24) * 60 + (mm % 60)
+    diff = user_total - utc_total
+    if diff < -720:
+        diff += 1440
+    elif diff > 840:
+        diff -= 1440
+    return diff
+
+def get_user_device_time_str(feats: dict) -> tuple[str, str]:
+    """برگرداندن ساعت دقیق فعلی بر اساس ساعت دستگاه کاربر (معمولی و فونت دارک)"""
+    offset_mins = int(feats.get("clock_offset_mins", 210))
+    user_dt = datetime.now(timezone.utc) + timedelta(minutes=offset_mins)
+    normal_t = user_dt.strftime("%H:%M")
+    fancy_t = normal_t.translate(CLOCK_FANCY_MAP)
+    return normal_t, fancy_t
+
+def strip_clock_from_text(name_str: str) -> str:
+    """حذف ساعت‌های قبلی از انتهای نام یا نام خانوادگی برای جلوگیری از تکرار ساعت"""
+    if not name_str:
+        return ""
+    cleaned = re.sub(r"[\s|•⏰⌚🌑\-]*([0-9𝟬-𝟵]{1,2}:[0-9𝟬-𝟵]{2})\s*$", "", name_str)
+    return cleaned.strip()
+
+async def update_user_profile_clock_now(uid: int, client: TelegramClient, force: bool = False):
+    """بروزرسانی دقیق ساعت در نام/نام خانوادگی پروفایل و بیوگرافی کاربر"""
+    feats = get_user_features(uid)
+    want_name_clock = bool(feats.get("f4"))
+    want_bio_clock = bool(feats.get("f3"))
+    want_online = bool(feats.get("f6"))
+
+    normal_t, fancy_t = get_user_device_time_str(feats)
+
+    if not force and LAST_CLOCK_MINUTE.get(uid) == normal_t:
+        return
+
+    try:
+        if want_online:
+            await client(functions.account.UpdateStatusRequest(offline=False))
+
+        profile_kwargs = {}
+
+        if want_name_clock:
+            me = await client.get_me()
+            raw_first = getattr(me, "first_name", "") or "User"
+            clean_first = strip_clock_from_text(raw_first) or raw_first
+            tpl = str(feats.get("name_clock_tpl", "| {time}")).strip()
+            if "{time}" not in tpl:
+                tpl = "| {time}"
+            clock_str = tpl.replace("{time}", fancy_t)
+            # قرار دادن نام اصلی در بخش نام و ساعت زنده در بخش نام خانوادگی (Last Name) و کنار نام
+            profile_kwargs["first_name"] = clean_first[:45]
+            profile_kwargs["last_name"] = clock_str[:45]
+
+        if want_bio_clock:
+            bio_tpl = str(feats.get("bio_template", "🌑 Self Dark | ⏰ {time}"))
+            profile_kwargs["about"] = bio_tpl.replace("{time}", normal_t)[:70]
+
+        if profile_kwargs:
+            await client(functions.account.UpdateProfileRequest(**profile_kwargs))
+            LAST_CLOCK_MINUTE[uid] = normal_t
+    except Exception as e:
+        logger.debug(f"خطا در بروزرسانی ساعت پروفایل کاربر {uid}: {e}")
+
 async def setup_telethon_handlers(user_id: int, client: TelegramClient):
     """ثبت تمام ۴۰ قابلیت سلف دارک و دستورات تبچی هوشمند روی کلاینت Telethon کاربر"""
 
@@ -561,10 +640,10 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
     async def on_any_new_message(event):
         feats = get_user_features(user_id)
 
-        # شمارش پیام‌ها و کش کردن برای Anti-Delete و Anti-Edit
+        # شمارش پیام‌ها و کش کردن بی‌صدا برای Anti-Delete و Anti-Edit (بدون ارسال هیچ گزارشی به Saved Messages)
         with closing(get_conn()) as conn, conn:
             conn.execute("UPDATE self_accounts SET msg_counter = msg_counter + 1 WHERE user_id=?", (user_id,))
-            if event.raw_text and (feats.get("f11") or feats.get("f12")):
+            if event.raw_text and (feats.get("f11") or feats.get("f12")) and not event.out:
                 sender = await event.get_sender()
                 sname = getattr(sender, "first_name", "کاربر") or "کاربر"
                 conn.execute(
@@ -575,6 +654,20 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
         # دستورات خروجی صاحب اکانت (Outgoing Self Dark Commands)
         if event.out and event.raw_text:
             txt = event.raw_text.strip()
+
+            # دستور همگام‌سازی مستقیم ساعت پروفایل با ساعت گوشی کاربر: «.ساعت 14:30»
+            if txt.startswith(".ساعت ") or txt.startswith(".clock "):
+                arg_t = normalize_digits(txt.split(" ", 1)[1].strip())
+                m_time = re.match(r"^(\d{1,2}):(\d{2})$", arg_t)
+                if m_time:
+                    hh, mm = int(m_time.group(1)), int(m_time.group(2))
+                    offset_m = compute_offset_mins_from_hhmm(hh, mm)
+                    feats["clock_offset_mins"] = offset_m
+                    feats["f4"] = True
+                    save_user_features(user_id, feats)
+                    await update_user_profile_clock_now(user_id, client, force=True)
+                    await event.edit(f"⏰ <b>ساعت پروفایل با ساعت دستگاه شما (<code>{hh:02d}:{mm:02d}</code>) تنظیم و فعال شد!</b>\nاز این پس هر دقیقه به‌صورت دقیق بروزرسانی می‌شود.", parse_mode="html")
+                    return
 
             # دستور ثبت گروه در تبچی هوشمند سلف دارک: «تنظیم چت»
             if txt == "تنظیم چت" and (event.is_group or event.is_channel):
@@ -730,106 +823,62 @@ async def setup_telethon_handlers(user_id: int, client: TelegramClient):
                 except Exception:
                     pass
 
-            # ۲۴. پیشنهاد هوشمند شکلک / ری‌اکشن خودکار
-            if feats.get("f24") and event.is_private:
-                emj = feats.get("auto_react_emoji", "🔥")
-                try:
-                    await client(functions.messages.SendReactionRequest(
-                        peer=event.chat_id,
-                        msg_id=event.id,
-                        reaction=[types.ReactionEmoji(emoticon=emj)]
-                    ))
-                except Exception:
-                    pass
-
-            # ۳۴. ضد لینک پیوی
-            if feats.get("f34") and event.is_private and event.raw_text:
-                if "t.me/" in event.raw_text or "http://" in event.raw_text or "https://" in event.raw_text:
-                    try:
-                        await event.delete()
-                        return
-                    except Exception:
-                        pass
-
-            # ۳۹. شکارچی تگ و منشن در گروه
-            if feats.get("f39") and event.is_group and event.mentioned:
-                try:
-                    chat = await event.get_chat()
-                    gtitle = getattr(chat, "title", "گروه")
-                    await client.send_message(
-                        "me",
-                        f"🔔 <b>شکارچی منشن سلف دارک:</b>\nدر گروه <b>{html.escape(gtitle)}</b> به شما اشاره شد:\n\n{html.escape(event.raw_text or 'مدیا')}",
-                        parse_mode="html"
-                    )
-                except Exception:
-                    pass
-
-            # ۱. پاسخگویی خودکار هوشمند در پیوی
-            if feats.get("f1") and event.is_private:
-                reply_txt = feats.get("autoreply_text", "سلام، در حال حاضر آنلاین نیستم. 🌑")
-                try:
-                    await event.reply(reply_txt)
-                except Exception:
-                    pass
-
-            # ۳۲. اکشن تایپینگ خودکار
-            if feats.get("f32") and event.is_private:
-                act = feats.get("chat_action", "typing")
-                try:
-                    async with client.action(event.chat_id, act):
-                        await asyncio.sleep(2)
-                except Exception:
-                    pass
-
-    # ۱۲. ذخیره تاریخچه ویرایش پیام‌ها (Anti-Edit)
-    @client.on(events.MessageEdited)
-    async def on_message_edited(event):
-        if event.out:
-            return
-        feats = get_user_features(user_id)
-        if not feats.get("f12"):
-            return
-        with closing(get_conn()) as conn:
-            old = conn.execute(
-                "SELECT * FROM edited_cache WHERE user_id=? AND chat_id=? AND msg_id=?",
-                (user_id, event.chat_id, event.id)
-            ).fetchone()
-        if old and event.raw_text and old["text_content"] != event.raw_text:
-            try:
-                await client.send_message(
-                    "me",
-                    f"✏️ <b>تشخیص ویرایش پیام (سلف دارک)</b>\n"
-                    f"👤 فرستنده: <b>{html.escape(old['sender_name'])}</b>\n"
-                    f"🔴 متن قبلی:\n<code>{html.escape(old['text_content'])}</code>\n\n"
-                    f"🟢 متن جدید:\n<code>{html.escape(event.raw_text)}</code>",
-                    parse_mode="html"
+            # بررسی اینکه در پیوی، فرستنده حتماً یک اکانت واقعی انسان باشد (نه ربات و نه اکانت سرویس تلگرام)
+            if event.is_private:
+                sender = await event.get_sender()
+                is_real_human_account = (
+                    sender is not None
+                    and isinstance(sender, types.User)
+                    and not getattr(sender, "bot", False)
+                    and not getattr(sender, "deleted", False)
+                    and not getattr(sender, "support", False)
+                    and sender.id not in (777000, user_id)
                 )
-            except Exception:
-                pass
 
-    # ۱۱. ذخیره پیام‌های حذف‌شده (Anti-Delete)
-    @client.on(events.MessageDeleted)
-    async def on_message_deleted(event):
-        feats = get_user_features(user_id)
-        if not feats.get("f11"):
-            return
-        for mid in event.deleted_ids:
-            with closing(get_conn()) as conn:
-                old = conn.execute(
-                    "SELECT * FROM edited_cache WHERE user_id=? AND msg_id=?",
-                    (user_id, mid)
-                ).fetchone()
-            if old:
-                try:
-                    await client.send_message(
-                        "me",
-                        f"🗑 <b>شکار پیام حذف‌شده (سلف دارک)</b>\n"
-                        f"👤 فرستنده: <b>{html.escape(old['sender_name'])}</b>\n"
-                        f"📝 متن پیام حذف‌شده:\n<code>{html.escape(old['text_content'])}</code>",
-                        parse_mode="html"
-                    )
-                except Exception:
-                    pass
+                if is_real_human_account:
+                    # ۲۴. پیشنهاد هوشمند شکلک / ری‌اکشن خودکار (فقط پیوی اکانت‌ها)
+                    if feats.get("f24"):
+                        emj = feats.get("auto_react_emoji", "🔥")
+                        try:
+                            await client(functions.messages.SendReactionRequest(
+                                peer=event.chat_id,
+                                msg_id=event.id,
+                                reaction=[types.ReactionEmoji(emoticon=emj)]
+                            ))
+                        except Exception:
+                            pass
+
+                    # ۳۴. ضد لینک پیوی (فقط پیوی اکانت‌ها)
+                    if feats.get("f34") and event.raw_text:
+                        if "t.me/" in event.raw_text or "http://" in event.raw_text or "https://" in event.raw_text:
+                            try:
+                                await event.delete()
+                                return
+                            except Exception:
+                                pass
+
+                    # ۱. پاسخگویی خودکار هوشمند (فقط برای پیوی اکانت‌های واقعی، نه ربات‌ها!)
+                    if feats.get("f1"):
+                        now_ts = time.time()
+                        last_rep = AUTOREPLY_COOLDOWN.get((user_id, sender.id), 0.0)
+                        if (now_ts - last_rep) >= 60.0:
+                            AUTOREPLY_COOLDOWN[(user_id, sender.id)] = now_ts
+                            reply_txt = feats.get("autoreply_text", "سلام، در حال حاضر آنلاین نیستم. 🌑")
+                            try:
+                                await event.reply(reply_txt)
+                            except Exception:
+                                pass
+
+                    # ۳۲. اکشن تایپینگ خودکار (فقط پیوی اکانت‌ها)
+                    if feats.get("f32"):
+                        act = feats.get("chat_action", "typing")
+                        try:
+                            async with client.action(event.chat_id, act):
+                                await asyncio.sleep(2)
+                        except Exception:
+                            pass
+
+    # توجه: طبق درخواست شما، هیچ گزارش لحظه‌ای (حذف، ویرایش یا منشن) به Saved Messages ("me") ارسال نمی‌شود.
 
 async def start_single_self_client(user_id: int, session_str: str) -> bool:
     if user_id in ACTIVE_SELF_CLIENTS:
@@ -850,6 +899,7 @@ async def start_single_self_client(user_id: int, session_str: str) -> bool:
 
         await setup_telethon_handlers(user_id, client)
         ACTIVE_SELF_CLIENTS[user_id] = client
+        await update_user_profile_clock_now(user_id, client, force=True)
         logger.info(f"🌑 سلف دارک برای کاربر {user_id} با موفقیت روشن شد.")
         return True
     except Exception as e:
@@ -858,6 +908,7 @@ async def start_single_self_client(user_id: int, session_str: str) -> bool:
 
 async def stop_single_self_client(user_id: int):
     client = ACTIVE_SELF_CLIENTS.pop(user_id, None)
+    LAST_CLOCK_MINUTE.pop(user_id, None)
     if client:
         try:
             await client.disconnect()
@@ -867,8 +918,18 @@ async def stop_single_self_client(user_id: int):
         conn.execute("UPDATE self_accounts SET is_running=0 WHERE user_id=?", (user_id,))
 
 # ====================================================================
-#  تسک‌های پس‌زمینه: ۱. کسر ساعتی ۳ الماس | ۲. تغییر ساعت بیو/نام | ۳. ارسال خودکار تبچی
+#  تسک‌های پس‌زمینه: ۱. کسر ساعتی ۳ الماس | ۲. ساعت دقیق هر دقیقه در پروفایل | ۳. ارسال خودکار تبچی
 # ====================================================================
+
+async def accurate_profile_clock_loop():
+    """حلقه بسیار دقیق که هر ۵ ثانیه بررسی می‌کند و دقیقاً در ثانیه تغییر هر دقیقه ساعت نام/نام خانوادگی و بیو را بروز می‌کند"""
+    while True:
+        try:
+            for uid, client in list(ACTIVE_SELF_CLIENTS.items()):
+                await update_user_profile_clock_now(uid, client, force=False)
+        except Exception as e:
+            logger.debug(f"Clock loop error: {e}")
+        await asyncio.sleep(5)
 
 async def hourly_diamond_billing_job(context: ContextTypes.DEFAULT_TYPE):
     """هر دقیقه چک می‌کند و به ازای هر ۱ ساعت روشن بودن سلف دارک، ۳ الماس از حساب کاربر کسر می‌کند"""
@@ -924,21 +985,12 @@ async def hourly_diamond_billing_job(context: ContextTypes.DEFAULT_TYPE):
 async def profile_and_tabchi_worker_job(context: ContextTypes.DEFAULT_TYPE):
     """اجرای زمان‌بندی تغییر بیوگرافی/نام اکانت و ارسال خودکار بنرهای تبچی هوشمند"""
     now = datetime.now()
-    time_str = now.strftime("%H:%M")
 
     for uid, client in list(ACTIVE_SELF_CLIENTS.items()):
         feats = get_user_features(uid)
 
-        # ۳. تغییر خودکار بیوگرافی و ۶. آنلاین دائمی
-        try:
-            if feats.get("f6"):
-                await client(functions.account.UpdateStatusRequest(offline=False))
-            if feats.get("f3"):
-                bio_tpl = feats.get("bio_template", "🌑 Self Dark | ⏰ {time}")
-                new_bio = bio_tpl.replace("{time}", time_str)[:70]
-                await client(functions.account.UpdateProfileRequest(about=new_bio))
-        except Exception:
-            pass
+        # بروزرسانی ساعت پروفایل و بیوگرافی
+        await update_user_profile_clock_now(uid, client, force=False)
 
         # اجرای تبچی هوشمند برای گروه‌های ثبت شده کاربر
         if get_setting("tabchi_global_enabled", "1") == "1" and feats.get("tabchi_enabled", True):
@@ -990,14 +1042,15 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
         ],
         [
             p_btn("خرید الماس (TON / ریالی)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+            p_btn("انتقال الماس به دیگران", callback_data="menu:transfer_diamonds", style="primary", emoji_key="sparkles"),
+        ],
+        [
             p_btn("زیرمجموعه‌گیری (۵ الماس رایگان)", callback_data="menu:referral", style="primary", emoji_key="gift"),
+            p_btn("هدیه روزانه و کد هدیه", callback_data="menu:daily_gift", style="success", emoji_key="party"),
         ],
         [
             p_btn("حساب کاربری من", callback_data="menu:profile", style="primary", emoji_key="star"),
             p_btn("راهنمای کامل سلف دارک", callback_data="menu:help", style="primary", emoji_key="zap"),
-        ],
-        [
-            p_btn("هدیه روزانه و کد هدیه", callback_data="menu:daily_gift", style="success", emoji_key="party"),
         ],
     ]
     if is_admin(user_id):
@@ -1082,8 +1135,8 @@ ADMIN_40_ITEMS = [
     ("adm:34", "۳۴. ارسال پیام مستقیم به پیوی کاربر", "primary"),
     ("adm:35", "۳۵. تنظیم متن تکمیلی راهنما", "primary"),
     ("adm:36", "۳۶. روشن/خاموش کردن ثبت سلف جدید", "danger"),
-    ("adm:37", "۳۷. پاکسازی کش پیام‌های حذف/ویرایش", "danger"),
-    ("adm:38", "۳۸. دریافت فایل بکاپ دیتابیس (.db)", "success"),
+    ("adm:37", "۳۷. بازگردانی فایل بکاپ (Restore)", "primary"),
+    ("adm:38", "۳۸. بکاپ کامل اطلاعات ربات و کاربران", "success"),
     ("adm:39", "۳۹. وضعیت سلامت سرور و پینگر Render", "primary"),
     ("adm:40", "۴۰. روشن/خاموش کردن کل ربات", "danger"),
 ]
@@ -1094,7 +1147,21 @@ def build_admin_keyboard(page: int = 0) -> InlineKeyboardMarkup:
     page = max(0, min(page, total_pages - 1))
     items = ADMIN_40_ITEMS[page * per_page : (page + 1) * per_page]
 
-    rows = []
+    transfer_on = get_setting("transfer_enabled", "1") == "1"
+    tr_label = "🟢 انتقال الماس: روشن" if transfer_on else "🔴 انتقال الماس: خاموش"
+    tr_style = "success" if transfer_on else "danger"
+    min_tr = get_setting("min_transfer_diamonds", "50")
+
+    rows = [
+        [
+            p_btn("📦 بکاپ کامل ربات و کاربران", callback_data="adm:backup_all", style="success", emoji_key="gem"),
+            p_btn("♻️ بازگردانی بکاپ (Restore)", callback_data="adm:restore_backup", style="primary", emoji_key="rocket"),
+        ],
+        [
+            p_btn(tr_label, callback_data="adm:toggle_transfer", style=tr_style, emoji_key="sparkles"),
+            p_btn(f"🔢 حداقل انتقال الماس ({min_tr})", callback_data="adm:set_min_transfer", style="primary", emoji_key="gem"),
+        ],
+    ]
     for i in range(0, len(items), 2):
         row = [p_btn(items[i][1], callback_data=items[i][0], style=items[i][2])]
         if i + 1 < len(items):
@@ -1135,7 +1202,10 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
     ADM_WAIT_FCH_ID,
     ADM_WAIT_FCH_LINK,
     ADM_WAIT_FCH_TITLE,
-) = range(15)
+    ADM_WAIT_RESTORE_FILE,
+    TRANSFER_WAIT_TARGET_ID,
+    TRANSFER_WAIT_AMOUNT,
+) = range(18)
 
 # ====================================================================
 #  هندلر شروع (/start) و منوهای اصلی سلف دارک
@@ -1262,6 +1332,9 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         kb = InlineKeyboardMarkup([
             [
                 p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+                p_btn("انتقال الماس به دیگران", callback_data="menu:transfer_diamonds", style="primary", emoji_key="sparkles"),
+            ],
+            [
                 p_btn("زیرمجموعه‌گیری رایگان", callback_data="menu:referral", style="primary", emoji_key="gift"),
             ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
@@ -1423,6 +1496,18 @@ async def self_features_callbacks(update: Update, context: ContextTypes.DEFAULT_
         feats[fkey] = not feats.get(fkey, False)
         save_user_features(user.id, feats)
         st = "🟢 روشن شد" if feats[fkey] else "🔴 خاموش شد"
+
+        # اگر ساعت زنده نام/نام خانوادگی یا بیوگرافی روشن/خاموش شد، بلافاصله روی اکانت اعمال شود
+        client = ACTIVE_SELF_CLIENTS.get(user.id)
+        if client:
+            if fkey in ("f4", "f3", "f6") and feats[fkey]:
+                await update_user_profile_clock_now(user.id, client, force=True)
+            elif fkey == "f4" and not feats[fkey]:
+                try:
+                    await client(functions.account.UpdateProfileRequest(last_name=""))
+                except Exception:
+                    pass
+
         await query.answer(f"{SELF_DARK_FEATURES[fkey]['title']} {st}!")
         await query.edit_message_reply_markup(reply_markup=build_features_keyboard(user.id, page))
 
@@ -1447,11 +1532,21 @@ async def feature_set_val_start(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["edit_feat_key"] = fkey
     context.user_data["edit_feat_page"] = int(page_str)
 
+    extra_hint = ""
+    if fkey == "f4":
+        normal_t, fancy_t = get_user_device_time_str(feats)
+        extra_hint = (
+            f"\n⏰ <b>ساعت فعلی تنظیم شده برای دستگاه شما:</b> <code>{normal_t}</code> ({fancy_t})\n"
+            f"💡 <b>راهنما:</b> اگر ساعت بالا با ساعت گوشی شما تفاوت دارد، کافی است <b>ساعت فعلی گوشی خود</b> را بفرستید (مثلاً <code>16:42</code>) تا دقیقاً با ساعت دستگاه شما هماهنگ شود و هر دقیقه در بخش نام/نام خانوادگی پروفایل بالا برود!\n"
+            f"یا می‌توانید قالب دلخواه با <code>{{time}}</code> بفرستید (مثلاً <code>| {{time}}</code>)."
+        )
+
     await query.edit_message_text(
         p_text(
             f"⚙️ <b>تنظیم مقدار برای «{meta['title']}»</b>\n\n"
             f"📌 عنوان تنظیم: <b>{meta['val_label']}</b>\n"
-            f"🔹 مقدار فعلی:\n<code>{html.escape(str(curr_val))}</code>\n\n"
+            f"🔹 مقدار فعلی:\n<code>{html.escape(str(curr_val))}</code>"
+            f"{extra_hint}\n\n"
             f"✨ لطفاً مقدار جدید را ارسال کنید:"
         ),
         parse_mode=ParseMode.HTML,
@@ -1469,12 +1564,30 @@ async def feature_set_val_save(update: Update, context: ContextTypes.DEFAULT_TYP
     meta = SELF_DARK_FEATURES[fkey]
     new_val = update.message.text.strip()
     feats = get_user_features(user.id)
-    feats[meta["val_key"]] = new_val
+
+    # اگر قابلیت ۴ (ساعت زنده در نام و نام خانوادگی پروفایل) است و کاربر ساعت فعلی دستگاه خود را وارد کرده (مثلاً 14:35)
+    if fkey == "f4":
+        norm_v = normalize_digits(new_val)
+        m_clock = re.search(r"(\d{1,2}):(\d{2})", norm_v)
+        if m_clock:
+            hh, mm = int(m_clock.group(1)), int(m_clock.group(2))
+            feats["clock_offset_mins"] = compute_offset_mins_from_hhmm(hh, mm)
+        if "{time}" in new_val:
+            feats["name_clock_tpl"] = new_val
+        elif not m_clock:
+            feats["name_clock_tpl"] = f"{new_val} {{time}}"
+    else:
+        feats[meta["val_key"]] = new_val
+
     feats[fkey] = True
     save_user_features(user.id, feats)
 
+    client = ACTIVE_SELF_CLIENTS.get(user.id)
+    if client and fkey in ("f4", "f3"):
+        await update_user_profile_clock_now(user.id, client, force=True)
+
     await update.message.reply_text(
-        p_text(f"✅ مقدار <b>{meta['val_label']}</b> با موفقیت ذخیره شد و قابلیت روشن گردید!"),
+        p_text(f"✅ تنظیمات <b>{meta['title']}</b> با موفقیت ذخیره شد و قابلیت روشن گردید!"),
         parse_mode=ParseMode.HTML,
         reply_markup=build_features_keyboard(user.id, page)
     )
@@ -2336,6 +2449,199 @@ async def gift_code_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ====================================================================
+#  بخش انتقال الماس بین کاربران با آیدی عددی (پشتیبانی از حداقل انتقال و قفل ادمین)
+# ====================================================================
+
+async def transfer_diamonds_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+
+    if get_setting("transfer_enabled", "1") == "0" and not is_admin(user.id):
+        await query.answer("⛔ بخش انتقال الماس در حال حاضر توسط مدیریت غیرفعال شده است.", show_alert=True)
+        return ConversationHandler.END
+
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    min_tr = int(get_setting("min_transfer_diamonds", "50"))
+
+    if db_user["diamonds"] < min_tr and not is_admin(user.id):
+        await query.answer(f"⚠️ موجودی شما ({db_user['diamonds']} الماس) کمتر از حداقل انتقال ({min_tr} الماس) است!", show_alert=True)
+        await query.edit_message_text(
+            p_text(
+                f"💎 <b>انتقال الماس به سایر کاربران</b>\n\n"
+                f"⚠️ موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
+                f"🔢 حداقل الماس قابل انتقال: <b>{min_tr} الماس</b>\n\n"
+                f"❌ موجودی شما برای انتقال الماس کافی نیست. ابتدا از طریق فروشگاه یا زیرمجموعه‌گیری موجودی خود را افزایش دهید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    p_btn("خرید الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+                    p_btn("زیرمجموعه‌گیری رایگان", callback_data="menu:referral", style="primary", emoji_key="gift"),
+                ],
+                [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+            ])
+        )
+        return ConversationHandler.END
+
+    await query.answer()
+    await query.edit_message_text(
+        p_text(
+            f"💎 <b>انتقال الماس به کاربر دیگر (مرحله ۱ از ۲)</b>\n\n"
+            f"💰 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
+            f"🔢 حداقل تعداد قابل انتقال: <b>{min_tr} الماس</b>\n\n"
+            f"👇 لطفاً <b>آیدی عددی (Numeric ID)</b> کاربری که می‌خواهید برای او الماس بفرستید را وارد کنید:\n"
+            f"<i>(مثال: <code>123456789</code>)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("menu:main")
+    )
+    return TRANSFER_WAIT_TARGET_ID
+
+async def transfer_receive_target_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    raw_txt = normalize_digits((update.message.text or "").strip())
+
+    if get_setting("transfer_enabled", "1") == "0" and not is_admin(user.id):
+        await update.message.reply_text(
+            p_text("⛔ بخش انتقال الماس توسط مدیریت غیرفعال شده است."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
+
+    if not raw_txt.isdigit():
+        await update.message.reply_text(
+            p_text("⚠️ آیدی وارد شده معتبر نیست! لطفاً فقط <b>آیدی عددی</b> کاربر مقصد را به صورت عدد وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return TRANSFER_WAIT_TARGET_ID
+
+    target_id = int(raw_txt)
+    if target_id == user.id:
+        await update.message.reply_text(
+            p_text("⚠️ شما نمی‌توانید به حساب خودتان الماس انتقال دهید! لطفاً آیدی عددی کاربر دیگری را وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return TRANSFER_WAIT_TARGET_ID
+
+    context.user_data["transfer_target_id"] = target_id
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    min_tr = int(get_setting("min_transfer_diamonds", "50"))
+
+    with closing(get_conn()) as conn:
+        target_row = conn.execute("SELECT first_name, username FROM users WHERE user_id=?", (target_id,)).fetchone()
+
+    target_info = (
+        f"<b>{html.escape(target_row['first_name'] or 'کاربر')}</b> (@{target_row['username'] or 'ندارد'})"
+        if target_row else "کاربر تلگرام (ثبت با آیدی عددی)"
+    )
+
+    await update.message.reply_text(
+        p_text(
+            f"💎 <b>انتقال الماس به کاربر دیگر (مرحله ۲ از ۲)</b>\n\n"
+            f"🎯 آیدی عددی گیرنده: <code>{target_id}</code> ({target_info})\n"
+            f"💰 موجودی قابل انتقال شما: <b>{db_user['diamonds']} الماس</b>\n"
+            f"🔢 حداقل انتقال مجاز: <b>{min_tr} الماس</b>\n\n"
+            f"👇 لطفاً <b>تعداد الماسی</b> که می‌خواهید انتقال دهید را وارد کنید (حداقل <code>{min_tr}</code>):"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("menu:main")
+    )
+    return TRANSFER_WAIT_AMOUNT
+
+async def transfer_receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    raw_txt = normalize_digits((update.message.text or "").strip())
+    target_id = context.user_data.get("transfer_target_id")
+
+    if not target_id:
+        await update.message.reply_text(
+            p_text("⚠️ اطلاعات تراکنش منقضی شده است. لطفاً مجدداً از منوی اصلی اقدام کنید."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
+
+    if get_setting("transfer_enabled", "1") == "0" and not is_admin(user.id):
+        await update.message.reply_text(
+            p_text("⛔ بخش انتقال الماس توسط مدیریت غیرفعال شده است."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
+
+    min_tr = int(get_setting("min_transfer_diamonds", "50"))
+    if not raw_txt.isdigit() or int(raw_txt) <= 0:
+        await update.message.reply_text(
+            p_text(f"⚠️ لطفاً یک عدد صحیح و معتبر (حداقل <b>{min_tr} الماس</b>) وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return TRANSFER_WAIT_AMOUNT
+
+    amount = int(raw_txt)
+    if amount < min_tr:
+        await update.message.reply_text(
+            p_text(f"⚠️ حداقل تعداد مجاز برای انتقال <b>{min_tr} الماس</b> است! لطفاً عددی بزرگ‌تر یا مساوی <code>{min_tr}</code> وارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return TRANSFER_WAIT_AMOUNT
+
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    if db_user["diamonds"] < amount:
+        await update.message.reply_text(
+            p_text(
+                f"❌ موجودی شما کافی نیست!\n"
+                f"💎 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
+                f"🔢 مقدار درخواستی: <b>{amount} الماس</b>\n\n"
+                f"لطفاً مقدار کمتری وارد کنید یا ابتدا حساب خود را شارژ نمایید:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("menu:main")
+        )
+        return TRANSFER_WAIT_AMOUNT
+
+    # تضمین وجود رکورد گیرنده در دیتابیس و انتقال آنی الماس
+    get_or_create_user(target_id)
+    add_user_diamonds(user.id, -amount)
+    add_user_diamonds(target_id, amount)
+
+    updated_sender = get_or_create_user(user.id)
+    updated_receiver = get_or_create_user(target_id)
+    context.user_data.pop("transfer_target_id", None)
+
+    # اطلاع‌رسانی به گیرنده الماس
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=p_text(
+                f"🎁 <b>دریافت الماس جدید!</b>\n\n"
+                f"👤 کاربر <b>{html.escape(user.first_name)}</b> (آیدی عددی: <code>{user.id}</code>) تعداد <b>{amount:,} الماس</b> به حساب شما منتقل کرد!\n"
+                f"💎 موجودی جدید شما: <b>{updated_receiver['diamonds']:,} الماس</b>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(target_id)
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        p_text(
+            f"✅ <b>انتقال الماس با موفقیت انجام شد!</b>\n\n"
+            f"📤 فرستنده: <code>{user.id}</code>\n"
+            f"📥 گیرنده: <code>{target_id}</code>\n"
+            f"💎 مقدار منتقل‌شده: <b>{amount:,} الماس</b>\n"
+            f"💰 موجودی جدید شما: <b>{updated_sender['diamonds']:,} الماس</b>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+    return ConversationHandler.END
+
+# ====================================================================
 #  هندلرهای پنل مدیریت ۴۰ قابلیته (شامل فوروارد پیام کاربر و تغییر موجودی)
 # ====================================================================
 
@@ -2351,10 +2657,13 @@ async def admin_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     ton_rate = get_setting("ton_per_diamond", "0.0005")
     ref_st = "🟢 روشن" if get_setting("referral_enabled", "1") == "1" else "🔴 خاموش"
     ref_rw = get_setting("referral_reward", "5")
+    tr_st = "🟢 روشن" if get_setting("transfer_enabled", "1") == "1" else "🔴 خاموش"
+    min_tr = get_setting("min_transfer_diamonds", "50")
 
     text = p_text(
         f"👑 <b>پنل مدیریت جامع «سلف دارک | Self Dark» (۴۰ قابلیت)</b>\n\n"
         f"💎 قیمت هر الماس: <b>{ton_rate} TON</b> | حداقل خرید: <b>{get_setting('min_buy_diamonds')} الماس</b>\n"
+        f"🔄 انتقال الماس: <b>{tr_st}</b> | حداقل انتقال: <b>{min_tr} الماس</b>\n"
         f"🎁 زیرمجموعه‌گیری: <b>{ref_st}</b> (پاداش: <b>{ref_rw} الماس</b>)\n"
         f"🌑 سلف‌های روشن در لحظه: <b>{len(ACTIVE_SELF_CLIENTS)} اکانت</b>\n\n"
         f"✨ صفحه {page + 1} از ۴ — یکی از قابلیت‌های زیر را انتخاب کنید:"
@@ -2561,18 +2870,22 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(p_text(f"✅ ثبت اکانت سلف جدید: <b>{st}</b>"), parse_mode=ParseMode.HTML, reply_markup=back_kb)
         return ConversationHandler.END
 
-    # ۳۷. پاکسازی کش پیام‌ها
-    elif act == "adm:37":
-        with closing(get_conn()) as conn, conn:
-            conn.execute("DELETE FROM edited_cache")
-        await query.edit_message_text(p_text("🗑 کش پیام‌های حذف و ویرایش پاکسازی شد."), parse_mode=ParseMode.HTML, reply_markup=back_kb)
-        return ConversationHandler.END
+    # ۳۷ یا دکمه بازگردانی بکاپ (Restore Backup)
+    elif act in ("adm:37", "adm:restore_backup"):
+        await query.edit_message_text(
+            p_text(
+                "♻️ <b>بازگردانی کامل اطلاعات ربات و کاربران (Restore Backup)</b>\n\n"
+                "✨ لطفاً فایل بکاپی که قبلاً از ربات دریافت کرده‌اید (فایل <code>.json</code> یا فایل دیتابیس <code>.db</code>) را در همینجا <b>ارسال یا فوروارد کنید</b>:\n\n"
+                "🔹 تمام اطلاعات کاربران، موجودی الماس‌ها، زیرمجموعه‌ها، اکانت‌های سلف متصل (Session)، گروه‌های تبچی، کدهای هدیه و تنظیمات ربات عیناً بازگردانی و فعال خواهند شد."
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_RESTORE_FILE
 
-    # ۳۸. ارسال فایل بکاپ دیتابیس
-    elif act == "adm:38":
-        if os.path.exists(DB_PATH):
-            with open(DB_PATH, "rb") as f:
-                await context.bot.send_document(chat_id=query.message.chat_id, document=f, caption=p_text("📦 فایل پشتیبان دیتابیس سلف دارک"), parse_mode=ParseMode.HTML)
+    # ۳۸ یا دکمه بکاپ کامل اطلاعات ربات و کاربران
+    elif act in ("adm:38", "adm:backup_all"):
+        await send_full_backup_to_admin(query.message.chat_id, context, page)
         return ConversationHandler.END
 
     # ۳۹. وضعیت سلامت سرور و پینگر Render
@@ -2598,6 +2911,19 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(p_text(f"✅ وضعیت کلی ربات سلف دارک: <b>{st}</b>"), parse_mode=ParseMode.HTML, reply_markup=back_kb)
         return ConversationHandler.END
 
+    # روشن یا خاموش کردن بخش انتقال الماس
+    elif act == "adm:toggle_transfer":
+        curr = get_setting("transfer_enabled", "1")
+        new_val = "0" if curr == "1" else "1"
+        set_setting("transfer_enabled", new_val)
+        st = "🟢 روشن و فعال شد" if new_val == "1" else "🔴 خاموش و غیرفعال شد"
+        await query.edit_message_text(
+            p_text(f"✅ وضعیت بخش <b>انتقال الماس بین کاربران</b> با موفقیت تغییر یافت:\n<b>{st}</b>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_admin_keyboard(page)
+        )
+        return ConversationHandler.END
+
     # سایر قابلیت‌هایی که ورودی متنی می‌گیرند
     prompts = {
         "adm:2":  "📣 <b>ارسال پیام همگانی</b>\nپیام خود را بفرستید:",
@@ -2620,6 +2946,7 @@ async def admin_router_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "adm:29": f"📅 <b>تنظیم الماس هدیه روزانه</b>\nمقدار فعلی: <b>{get_setting('daily_gift_diamonds')} الماس</b>\nعدد جدید را بفرستید:",
         "adm:34": "✉️ <b>ارسال پیام مستقیم به کاربر</b>\nبا فرمت <code>USER_ID:MESSAGE</code> بفرستید:",
         "adm:35": "📚 <b>تنظیم متن تکمیلی انتهای راهنما</b>\nمتن جدید را بفرستید:",
+        "adm:set_min_transfer": f"🔢 <b>تغییر حداقل انتقال الماس بین کاربران</b>\nحداقل فعلی: <b>{get_setting('min_transfer_diamonds', '50')} الماس</b>\nلطفاً عدد جدید حداقل انتقال الماس را وارد کنید (مثلاً <code>50</code> یا <code>20</code>):",
     }
 
     if act in prompts:
@@ -2841,6 +3168,17 @@ async def admin_handle_generic_input(update: Update, context: ContextTypes.DEFAU
         await msg.reply_text(p_text("✅ متن تکمیلی راهنما بروزرسانی شد."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
         return ConversationHandler.END
 
+    elif act == "adm:set_min_transfer":
+        norm_num = normalize_digits(txt)
+        if norm_num.isdigit() and int(norm_num) >= 1:
+            set_setting("min_transfer_diamonds", str(int(norm_num)))
+            await msg.reply_text(
+                p_text(f"✅ حداقل انتقال الماس بین کاربران با موفقیت روی <b>{int(norm_num)} الماس</b> تنظیم شد."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_admin_keyboard(page)
+            )
+            return ConversationHandler.END
+
     await msg.reply_text(p_text("⚠️ فرمت ورودی نامعتبر بود. به پنل مدیریت بازگشتید."), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
     return ConversationHandler.END
 
@@ -2876,6 +3214,162 @@ async def admin_add_fch_step3(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(p_text(f"✅ کانال <b>{html.escape(title)}</b> اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
     return ConversationHandler.END
 
+async def send_full_backup_to_admin(chat_id: int, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    """تهیه بکاپ جامع از تمام اطلاعات ربات و کاربران (هم فایل JSON کامل و هم فایل DB)"""
+    tables = [
+        "users",
+        "self_accounts",
+        "tabchi_groups",
+        "settings",
+        "force_channels",
+        "ton_orders",
+        "gift_codes",
+        "gift_uses",
+        "private_notes",
+    ]
+    backup_payload = {
+        "bot": "self_dark",
+        "version": "4.0",
+        "created_at": datetime.now().isoformat(),
+        "tables": {},
+    }
+    with closing(get_conn()) as conn:
+        for t in tables:
+            try:
+                rows = conn.execute(f"SELECT * FROM {t}").fetchall()
+                backup_payload["tables"][t] = [dict(r) for r in rows]
+            except Exception:
+                backup_payload["tables"][t] = []
+
+        u_cnt = len(backup_payload["tables"].get("users", []))
+        d_sum = sum(int(x.get("diamonds", 0)) for x in backup_payload["tables"].get("users", []))
+        s_cnt = len(backup_payload["tables"].get("self_accounts", []))
+        t_cnt = len(backup_payload["tables"].get("tabchi_groups", []))
+
+    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_bytes = json.dumps(backup_payload, ensure_ascii=False, indent=2).encode("utf-8")
+    bio = io.BytesIO(json_bytes)
+    bio.name = f"self_dark_full_backup_{ts_str}.json"
+
+    caption = p_text(
+        f"📦 <b>بکاپ کامل اطلاعات ربات و کاربران «سلف دارک»</b>\n\n"
+        f"👥 کل کاربران ذخیره شده: <b>{u_cnt:,} نفر</b>\n"
+        f"💎 مجموع الماس کاربران: <b>{d_sum:,} الماس</b>\n"
+        f"🌑 اکانت‌های سلف و سشن‌ها: <b>{s_cnt} اکانت</b>\n"
+        f"📣 گروه‌های تبچی ثبت‌شده: <b>{t_cnt} گروه</b>\n"
+        f"⏰ تاریخ تهیه بکاپ: <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
+        f"♻️ برای بازگردانی، هر زمان کافی است دکمه <b>«♻️ بازگردانی بکاپ (Restore)»</b> را در پنل ادمین بزنید و همین فایل را ارسال کنید."
+    )
+    await context.bot.send_document(
+        chat_id=chat_id,
+        document=bio,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(page)
+    )
+
+async def admin_receive_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت فایل بکاپ (.json یا .db) از ادمین و بازگردانی کامل تمام اطلاعات کاربران و ربات"""
+    msg = update.message
+    page = context.user_data.get("adm_page", 0)
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    if not msg.document:
+        await msg.reply_text(
+            p_text("⚠️ لطفاً <b>فایل بکاپ</b> (با پسوند <code>.json</code> یا <code>.db</code>) را ارسال یا فوروارد کنید:"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard(f"admin:page:{page}")
+        )
+        return ADM_WAIT_RESTORE_FILE
+
+    wait_m = await msg.reply_text(p_text("⏳ در حال بررسی فایل بکاپ و بازگردانی کل اطلاعات کاربران و ربات..."), parse_mode=ParseMode.HTML)
+
+    try:
+        tg_file = await context.bot.get_file(msg.document.file_id)
+        raw_bytes = bytes(await tg_file.download_as_bytearray())
+
+        restored_counts = {"users": 0, "self_accounts": 0, "tabchi_groups": 0, "settings": 0}
+
+        # بررسی اینکه فایل SQLite (.db) است یا فایل JSON
+        if raw_bytes.startswith(b"SQLite format 3"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+            try:
+                src_conn = sqlite3.connect(tmp_path)
+                src_conn.row_factory = sqlite3.Row
+                with closing(get_conn()) as dst_conn, dst_conn:
+                    for t_name in ["users", "self_accounts", "tabchi_groups", "settings", "force_channels", "ton_orders", "gift_codes", "gift_uses", "private_notes"]:
+                        try:
+                            rows = src_conn.execute(f"SELECT * FROM {t_name}").fetchall()
+                            if rows:
+                                cols = rows[0].keys()
+                                placeholders = ",".join(["?"] * len(cols))
+                                col_names = ",".join(cols)
+                                for r in rows:
+                                    dst_conn.execute(
+                                        f"INSERT OR REPLACE INTO {t_name} ({col_names}) VALUES ({placeholders})",
+                                        tuple(r[c] for c in cols)
+                                    )
+                                if t_name in restored_counts:
+                                    restored_counts[t_name] = len(rows)
+                        except Exception:
+                            pass
+                src_conn.close()
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        else:
+            data = json.loads(raw_bytes.decode("utf-8"))
+            tables_data = data.get("tables", {})
+            with closing(get_conn()) as dst_conn, dst_conn:
+                for t_name, rows in tables_data.items():
+                    if not isinstance(rows, list) or not rows:
+                        continue
+                    if t_name not in ("users", "self_accounts", "tabchi_groups", "settings", "force_channels", "ton_orders", "gift_codes", "gift_uses", "private_notes"):
+                        continue
+                    cols = list(rows[0].keys())
+                    placeholders = ",".join(["?"] * len(cols))
+                    col_names = ",".join(cols)
+                    for r in rows:
+                        dst_conn.execute(
+                            f"INSERT OR REPLACE INTO {t_name} ({col_names}) VALUES ({placeholders})",
+                            tuple(r.get(c) for c in cols)
+                        )
+                    if t_name in restored_counts:
+                        restored_counts[t_name] = len(rows)
+
+        # راه‌اندازی مجدد تمام اکانت‌های سلف بازگردانی شده
+        with closing(get_conn()) as conn:
+            running_accs = conn.execute("SELECT * FROM self_accounts WHERE is_running=1").fetchall()
+        reconnected = 0
+        for acc in running_accs:
+            if await start_single_self_client(acc["user_id"], acc["session_string"]):
+                reconnected += 1
+
+        await wait_m.edit_text(
+            p_text(
+                f"✅ <b>بازگردانی بکاپ (Restore) با موفقیت کامل انجام شد!</b>\n\n"
+                f"👥 کاربران بازگردانی شده: <b>{restored_counts['users']:,} نفر</b>\n"
+                f"🌑 اکانت‌های سلف بازیابی شده: <b>{restored_counts['self_accounts']} اکانت</b> (متصل شده در لحظه: <b>{reconnected}</b>)\n"
+                f"📣 گروه‌های تبچی بازیابی شده: <b>{restored_counts['tabchi_groups']} گروه</b>\n"
+                f"⚙️ تنظیمات بازیابی شده: <b>{restored_counts['settings']} مورد</b>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_admin_keyboard(page)
+        )
+    except Exception as e:
+        await wait_m.edit_text(
+            p_text(f"❌ خطا در بازگردانی فایل بکاپ:\n<code>{html.escape(str(e)[:150])}</code>"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_admin_keyboard(page)
+        )
+
+    return ConversationHandler.END
+
 # ====================================================================
 #  بازیابی خودکار سلف‌های روشن هنگام بالا آمدن سرور Render
 # ====================================================================
@@ -2890,6 +3384,9 @@ async def post_init_startup(application: Application):
 
     for acc in running_accs:
         await start_single_self_client(acc["user_id"], acc["session_string"])
+
+    # اجرای حلقه بسیار دقیق ساعت پروفایل (هر دقیقه دقیق بر اساس ساعت دستگاه کاربر)
+    asyncio.create_task(accurate_profile_clock_loop())
 
     # ثبت جاب‌های دوره‌ای در JobQueue
     if application.job_queue:
@@ -3013,7 +3510,21 @@ def main():
         allow_reentry=True,
     )
 
-    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته
+    # ۵.۵ مکالمه انتقال الماس بین کاربران با آیدی عددی
+    transfer_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(transfer_diamonds_start, pattern="^menu:transfer_diamonds$")],
+        states={
+            TRANSFER_WAIT_TARGET_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_receive_target_id)],
+            TRANSFER_WAIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_receive_amount)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
+    # ۶. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ و مدیریت انتقال الماس)
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_router_callback, pattern="^adm:")],
         states={
@@ -3023,6 +3534,7 @@ def main():
             ADM_WAIT_FCH_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step1)],
             ADM_WAIT_FCH_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step2)],
             ADM_WAIT_FCH_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_fch_step3)],
+            ADM_WAIT_RESTORE_FILE: [MessageHandler(filters.ALL & ~filters.COMMAND, admin_receive_restore_file)],
         },
         fallbacks=[
             CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"),
@@ -3037,6 +3549,7 @@ def main():
     app.add_handler(tabchi_conv)
     app.add_handler(buy_ton_conv)
     app.add_handler(gift_conv)
+    app.add_handler(transfer_conv)
     app.add_handler(admin_conv)
     app.add_handler(CommandHandler("start", start_cmd))
 
