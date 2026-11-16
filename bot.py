@@ -75,7 +75,7 @@ from telethon.errors import (
 #  تنظیمات اصلی ربات، توکن، API Hash و ادمین
 # ====================================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8315326974:AAFYg6ygEYi7V3tZzUFBzciADoi1d_1UQLo")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8649807066:AAGZlazLVFr-jWDz8BURuFSP2K7WNRmRh-4")
 ADMIN_ID = 8248647747
 ADMIN_IDS = [8248647747]
 
@@ -298,7 +298,8 @@ SELF_DARK_FEATURES = {
     "f42": {"title": "۴۲. عضویت اجباری پیوی (حداکثر ۳ کانال)", "type": "toggle_panel", "panel_cb": "pvforce:menu", "desc": "حذف سریع پیام پیوی افراد عضو نشده و ارسال دکمه‌های شیشه‌ای کانال‌ها"},
     "f43": {"title": "۴۳. ساخت قرعه‌کشی برای کانال", "type": "action_only", "action_cb": "lotto:start", "style": "success", "emoji_key": "gift"},
     "f44": {"title": "۴۴. ساخت دکمه شیشه‌ای برای کانال", "type": "action_only", "action_cb": "chbtn:start", "style": "primary", "emoji_key": "sparkles"},
-    "f45": {"title": "۴۵. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت)", "type": "action_only", "action_cb": "self:central_panel", "style": "primary", "emoji_key": "crown"},
+    "f45": {"title": "۴۵. ساخت چالش لایکی برای کانال", "type": "action_only", "action_cb": "likechal:start", "style": "danger", "emoji_key": "heart"},
+    "f46": {"title": "۴۶. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت)", "type": "action_only", "action_cb": "self:central_panel", "style": "primary", "emoji_key": "crown"},
 }
 
 def get_default_features_dict() -> dict:
@@ -336,7 +337,8 @@ def init_db():
                 referral_verified INTEGER DEFAULT 0,
                 referrals_count INTEGER DEFAULT 0,
                 is_banned INTEGER DEFAULT 0,
-                last_daily_gift TEXT DEFAULT NULL
+                last_daily_gift TEXT DEFAULT NULL,
+                welcome_gift_claimed INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS self_accounts (
@@ -497,13 +499,31 @@ def init_db():
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (owner_id, sender_id)
             );
+
+            CREATE TABLE IF NOT EXISTS like_challenge_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER NOT NULL,
+                channel_id TEXT NOT NULL,
+                channel_title TEXT DEFAULT '',
+                participant_name TEXT NOT NULL,
+                message_id INTEGER DEFAULT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS like_challenge_votes (
+                item_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (item_id, user_id)
+            );
         """)
 
-        # ارتقای بدون خطای جدول edited_cache برای پشتیبانی کامل از .حذفیات و .ویرایشها
+        # ارتقای بدون خطای جداول برای دیتابیس‌های قبلی
         for col_sql in [
             "ALTER TABLE edited_cache ADD COLUMN is_deleted INTEGER DEFAULT 0",
             "ALTER TABLE edited_cache ADD COLUMN edited_text TEXT DEFAULT NULL",
             "ALTER TABLE edited_cache ADD COLUMN created_at TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN welcome_gift_claimed INTEGER DEFAULT 0",
         ]:
             try:
                 conn.execute(col_sql)
@@ -518,7 +538,7 @@ def init_db():
             "hourly_cost": "3",
             "referral_enabled": "1",
             "referral_reward": "5",
-            "welcome_bonus": "0",
+            "welcome_bonus": "60",
             "daily_gift_diamonds": "2",
             "rial_support_id": "@kanfingfreesup",
             "bot_active": "1",
@@ -530,6 +550,12 @@ def init_db():
         }
         for k, v in default_settings.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+        # تنظیم پیش‌فرض ۶۰ الماس هدیه ورود اولیه
+        wb_init = conn.execute("SELECT value FROM settings WHERE key='welcome_bonus_60_v1'").fetchone()
+        if not wb_init:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('welcome_bonus', '60')")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('welcome_bonus_60_v1', '1')")
 
         # حذف هرگونه کانال جوین اجباری قبلی یا پیش‌فرض که ادمین اضافه نکرده است
         fch_cleaned = conn.execute("SELECT value FROM settings WHERE key='force_channels_cleaned_v4'").fetchone()
@@ -574,12 +600,11 @@ def get_or_create_user(user_id: int, username: str = "", first_name: str = "", i
     with closing(get_conn()) as conn, conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            welcome_d = int(get_setting("welcome_bonus", "0"))
             valid_inv = invited_by if (invited_by and invited_by != user_id) else None
             conn.execute(
-                """INSERT INTO users (user_id, username, first_name, joined_at, diamonds, invited_by)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, username or "", first_name or "کاربر", datetime.now().isoformat(), welcome_d, valid_inv)
+                """INSERT INTO users (user_id, username, first_name, joined_at, diamonds, invited_by, welcome_gift_claimed)
+                   VALUES (?, ?, ?, ?, 0, ?, 0)""",
+                (user_id, username or "", first_name or "کاربر", datetime.now().isoformat(), valid_inv)
             )
             user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         else:
@@ -588,6 +613,28 @@ def get_or_create_user(user_id: int, username: str = "", first_name: str = "", i
                 (username or "", first_name or "کاربر", user_id)
             )
         return user
+
+def grant_first_entry_gift_if_eligible(user_id: int) -> int:
+    """
+    اعطای ۶۰ الماس هدیه ورود اولیه به هر کاربر (فقط یک‌بار):
+    - اگر کانال جوین اجباری وجود داشته باشد: بلافاصله پس از عضویت و تایید عضویت اعطا می‌شود.
+    - اگر کانال جوین اجباری وجود نداشته باشد: بلافاصله در اولین استارت اعطا می‌شود.
+    """
+    try:
+        gift_amount = int(get_setting("welcome_bonus", "60"))
+        if gift_amount <= 0:
+            gift_amount = 60
+    except Exception:
+        gift_amount = 60
+
+    with closing(get_conn()) as conn, conn:
+        cur = conn.execute(
+            "UPDATE users SET diamonds = diamonds + ?, welcome_gift_claimed = 1 WHERE user_id = ? AND COALESCE(welcome_gift_claimed, 0) = 0",
+            (gift_amount, user_id)
+        )
+        if cur.rowcount > 0:
+            return gift_amount
+    return 0
 
 def add_user_diamonds(user_id: int, delta: int):
     with closing(get_conn()) as conn, conn:
@@ -1951,8 +1998,8 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
             p_btn(f"فعالسازی و اتصال سلف دارک ({self_status})", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
         ],
         [
-            p_btn("مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
-            p_btn("📖 توضیحات قابلیت‌ها (۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
+            p_btn("مدیریت ۴۶ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
+            p_btn("📖 توضیحات قابلیت‌ها (۴۶ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
         ],
         [
             p_btn("تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
@@ -1967,6 +2014,9 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
             p_btn("هدیه روزانه و کد هدیه", callback_data="menu:daily_gift", style="success", emoji_key="party"),
         ],
         [
+            p_btn("🏆 لیدربورد (برترین‌های الماس)", callback_data="menu:leaderboard", style="danger", emoji_key="crown"),
+        ],
+        [
             p_btn("حساب کاربری من", callback_data="menu:profile", style="primary", emoji_key="star"),
             p_btn("راهنما و پشتیبانی", callback_data="menu:help", style="primary", emoji_key="zap"),
         ],
@@ -1978,7 +2028,7 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
-    """صفحه‌بندی قابلیت‌های سلف دارک (شامل دکمه توضیحات کامل ۴۵ قابلیت، کامنت اول، عضویت اجباری پیوی، قرعه‌کشی، دکمه شیشه‌ای و پنل مرکزی)"""
+    """صفحه‌بندی قابلیت‌های سلف دارک (شامل دکمه توضیحات کامل ۴۶ قابلیت، چالش لایکی، قرعه‌کشی، دکمه شیشه‌ای، عضویت اجباری پیوی و پنل مرکزی)"""
     feats = get_user_features(user_id)
     keys = list(SELF_DARK_FEATURES.keys())
     per_page = 10
@@ -1988,14 +2038,17 @@ def build_features_keyboard(user_id: int, page: int = 0) -> InlineKeyboardMarkup
 
     rows = [
         [
-            p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل هر ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
+            p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل هر ۴۶ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
         ],
         [
+            p_btn("❤️ ساخت چالش لایکی کانال", callback_data="likechal:start", style="danger", emoji_key="heart"),
             p_btn("🎁 ساخت قرعه‌کشی کانال", callback_data="lotto:start", style="success", emoji_key="gift"),
-            p_btn("✨ ساخت دکمه شیشه‌ای کانال", callback_data="chbtn:start", style="primary", emoji_key="sparkles"),
         ],
         [
+            p_btn("✨ ساخت دکمه شیشه‌ای کانال", callback_data="chbtn:start", style="primary", emoji_key="sparkles"),
             p_btn("🛡 عضویت اجباری پیوی", callback_data="pvforce:menu", style="primary", emoji_key="zap"),
+        ],
+        [
             p_btn("📊 پنل مرکزی (گزارش ۲۴ ساعته)", callback_data="self:central_panel", style="primary", emoji_key="crown"),
         ],
     ]
@@ -2181,7 +2234,9 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
     CHBTN_WAIT_COLOR,
     CHBTN_WAIT_CHANNEL,
     CHBTN_WAIT_CONFIRM,
-) = range(41)
+    LIKECHAL_WAIT_CHANNEL,
+    LIKECHAL_WAIT_NAMES,
+) = range(43)
 
 # ====================================================================
 #  هندلر شروع (/start) و منوهای اصلی سلف دارک
@@ -2223,24 +2278,38 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
+        bonus_preview = int(get_setting("welcome_bonus", "60") or "60")
+        gift_hint = (
+            f"\n🎁 پس از عضویت در کانال‌ها و زدن دکمه تایید، <b>{bonus_preview} الماس هدیه ورود</b> به حساب شما اضافه خواهد شد!"
+            if not db_user["welcome_gift_claimed"] else ""
+        )
         await update.message.reply_text(
-            p_text("👋 سلام! برای ورود به ربات <b>سلف دارک (Self Dark)</b> و ثبت زیرمجموعه، ابتدا در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ عضو شدم»</b> را بزنید:"),
+            p_text(
+                f"👋 سلام! برای ورود به ربات <b>سلف دارک (Self Dark)</b>، ابتدا در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ عضو شدم»</b> را بزنید:{gift_hint}"
+            ),
             parse_mode=ParseMode.HTML,
             reply_markup=build_force_join_keyboard(not_joined)
         )
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
+    gifted_amt = grant_first_entry_gift_if_eligible(user.id)
     db_user = get_or_create_user(user.id, user.username, user.first_name)
     acc = get_self_account(user.id)
     self_state = "🟢 روشن و متصل" if (acc and acc["is_running"] == 1) else "🔴 خاموش / متصل نشده"
 
+    gift_banner = (
+        f"🎁 <b>هدیه ورود اولیه:</b> تبریک! تعداد <b>+{gifted_amt} الماس رایگان</b> به حساب شما اضافه شد!\n\n"
+        if gifted_amt > 0 else ""
+    )
+
     welcome = p_text(
         f"🌑 <b>به ربات هوشمند «سلف دارک | Self Dark» خوش آمدید!</b>\n\n"
+        f"{gift_banner}"
         f"👤 کاربر: <b>{html.escape(user.first_name)}</b>\n"
         f"💎 موجودی الماس شما: <b>{db_user['diamonds']} الماس</b>\n"
         f"⚡ وضعیت سلف دارک: <b>{self_state}</b>\n\n"
-        f"🚀 با <b>سلف دارک</b>، اکانت تلگرام خود را به ۴۰ قابلیت پیشرفته (ضد حذف، ضد ویرایش، ساعت زنده، منشی هوشمند، هوش مصنوعی و...) و <b>تبچی هوشمند گروهی</b> مجهز کنید!\n\n"
+        f"🚀 با <b>سلف دارک</b>، اکانت تلگرام خود را به ۴۶ قابلیت پیشرفته (ضد حذف، ضد ویرایش، ساعت زنده، منشی هوشمند، هوش مصنوعی، چالش لایکی کانال و...) و <b>تبچی هوشمند گروهی</b> مجهز کنید!\n\n"
         f"✨ از دکمه‌های شیشه‌ای رنگی زیر بخش مورد نظر خود را انتخاب کنید:"
     )
     await update.message.reply_text(welcome, parse_mode=ParseMode.HTML, reply_markup=main_inline_keyboard(user.id))
@@ -2248,14 +2317,25 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    get_or_create_user(user.id, user.username, user.first_name)
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
         await query.answer("⚠️ هنوز در تمام کانال‌ها عضو نشده‌اید!", show_alert=True)
         return
-    await query.answer("✅ عضویت شما تایید شد!")
+
     await verify_referral_if_eligible(context.bot, user.id)
+    gifted_amt = grant_first_entry_gift_if_eligible(user.id)
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+
+    if gifted_amt > 0:
+        await query.answer(f"🎉 عضویت شما تایید شد و +{gifted_amt} الماس هدیه ورود دریافت کردید!", show_alert=True)
+        gift_line = f"\n🎁 <b>هدیه ورود اولیه: +{gifted_amt} الماس رایگان به حساب شما اضافه شد!</b>\n💎 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
+    else:
+        await query.answer("✅ عضویت شما تایید شد!")
+        gift_line = f"\n💎 موجودی فعلی شما: <b>{db_user['diamonds']} الماس</b>\n"
+
     await query.edit_message_text(
-        p_text(f"✅ <b>عضویت شما تایید شد!</b>\n🌑 به ربات <b>سلف دارک</b> خوش آمدید:"),
+        p_text(f"✅ <b>عضویت شما تایید شد!</b>{gift_line}\n🌑 به ربات <b>سلف دارک</b> خوش آمدید:"),
         parse_mode=ParseMode.HTML,
         reply_markup=main_inline_keyboard(user.id)
     )
@@ -2281,6 +2361,8 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
+    grant_first_entry_gift_if_eligible(user.id)
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
     await query.answer()
 
     if data == "menu:main":
@@ -2296,6 +2378,42 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=main_inline_keyboard(user.id)
+        )
+
+    elif data == "menu:leaderboard":
+        with closing(get_conn()) as conn:
+            top_50 = conn.execute(
+                "SELECT first_name, diamonds FROM users ORDER BY diamonds DESC, user_id ASC LIMIT 50"
+            ).fetchall()
+
+        lines = [
+            "🏆 <b>لیدربورد ۵۰ کاربر برتر سلف دارک (بیشترین الماس)</b>",
+            "━━━━━━━━━━━━━━━━━━━━\n",
+        ]
+        if not top_50:
+            lines.append("⚠️ هنوز کاربری در لیست برترین‌ها ثبت نشده است.")
+        else:
+            for idx, u_row in enumerate(top_50, start=1):
+                u_name = html.escape((u_row["first_name"] or "کاربر").strip() or "کاربر")
+                d_val = int(u_row["diamonds"] or 0)
+                if idx == 1:
+                    rank_badge = "🥇 ۱."
+                elif idx == 2:
+                    rank_badge = "🥈 ۲."
+                elif idx == 3:
+                    rank_badge = "🥉 ۳."
+                else:
+                    rank_badge = f"🔹 {idx}."
+                lines.append(f"{rank_badge} <b>{u_name}</b> — <b>{d_val:,} الماس</b> 💎")
+
+        kb = InlineKeyboardMarkup([
+            [p_btn("🔄 بروزرسانی لیدربورد", callback_data="menu:leaderboard", style="danger", emoji_key="crown")],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")],
+        ])
+        await query.edit_message_text(
+            p_text("\n".join(lines)),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
         )
 
     elif data == "menu:profile":
@@ -2680,9 +2798,9 @@ SELF_FEATURES_GUIDE_PAGES = [
         "• <b>کارکرد:</b> حذف گروهی و سریع پیام‌های ارسالی خودتان در هر پیوی یا گروه.\n"
         "• <b>نحوه استفاده دقیق:</b> قابلیت ۴۰ را روشن کنید و بنویسید <code>.del [تعداد]</code> (مثال: <code>.del 20</code> برای پاک کردن ۲۰ پیام آخر خودتان در یک ثانیه)."
     ),
-    # صفحه ۹ (قابلیت‌های ۴۱ تا ۴۵)
+    # صفحه ۹ (قابلیت‌های ۴۱ تا ۴۶)
     (
-        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۹ از ۹ (قابلیت‌های ۴۱ تا ۴۵)</b>\n"
+        "📖 <b>توضیحات کامل قابلیت‌های سلف دارک — صفحه ۹ از ۹ (قابلیت‌های ۴۱ تا ۴۶)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "4️⃣1️⃣ <b>۴۱. کامنت اول خودکار کانال (با امضای Self Dark):</b>\n"
         "• <b>کارکرد:</b> به محض اینکه پست جدیدی در کانال گذاشته شود، اکانت شما در کسری از ثانیه اولین کامنت را زیر پست ثبت می‌کند!\n"
@@ -2696,7 +2814,10 @@ SELF_FEATURES_GUIDE_PAGES = [
         "• <b>کارکرد و استفاده:</b> روی گزینه ۴۳ کلیک کنید؛ نام قرعه‌کشی، حداقل/حداکثر نفرات، کانال‌های جوین اجباری (تا ۱۰ کانال)، توضیحات، زمان پایان (به ساعت یا دقیقه)، تعداد برنده‌ها و کانال مقصد را بدهید و <b>«🚀 پست کردن در کانال»</b> را بزنید. بنر با دکمه شیشه‌ای سبز (شمارنده زنده نفرات) و دکمه آبی («🎁 شرکت در قرعه‌کشی») پست شده و سر ساعت خودکار قرعه‌کشی و اعلام برنده می‌شود!\n\n"
         "4️⃣4️⃣ <b>۴۴. ساخت دکمه شیشه‌ای رنگی برای کانال:</b>\n"
         "• <b>کارکرد و استفاده:</b> روی گزینه ۴۴ کلیک کنید؛ پست (عکس/ویدیو/گیف/فایل/متن)، لینک دکمه، نام دکمه، رنگ دکمه (<b>آبی، سبز، قرمز یا معمولی شیشه‌ای</b>) و کانال مقصد را بدهید تا در کانال پست شود.\n\n"
-        "4️⃣5️⃣ <b>۴۵. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت):</b>\n"
+        "4️⃣5️⃣ <b>۴۵. ساخت چالش لایکی برای کانال (با شرط عضویت در کانال):</b>\n"
+        "• <b>کارکرد:</b> ارسال اسم شرکت‌کنندگان در کانال به همراه دکمه شیشه‌ای لایک (<code>❤️</code>) و شمارنده زنده لایک‌ها.\n"
+        "• <b>نحوه استفاده دقیق:</b> در بخش قابلیت‌های سلف روی <b>«❤️ ساخت چالش لایکی کانال»</b> (گزینه ۴۵) بزنید؛ ابتدا لینک یا آیدی کانالی که می‌خواهید چالش در آن ارسال شود را بفرستید (ربات باید در کانال ادمین باشد). سپس هر چند تا اسم که می‌خواهید بفرستید تا هر اسم با دکمه شیشه‌ای لایک در کانال پست شود! کاربران برای لایک کردن <b>حتماً باید عضو همان کانال باشند</b> وگرنه لایک آن‌ها حساب نمی‌شود؛ همچنین با یک بار زدن لایک ثبت شده و اگر دوباره روی دکمه بزنند لایکشان پس گرفته می‌شود.\n\n"
+        "4️⃣6️⃣ <b>۴۶. پنل مرکزی (گزارش ۲۴ ساعت گذشته اکانت):</b>\n"
         "• <b>کارکرد و استفاده:</b> آخرین قابلیت سلف دارک؛ با کلیک روی آن در ربات (یا ارسال دستور <code>.پنل مرکزی</code> در چت)، آمار دقیق تمام پیام‌های شما در گروه‌ها، پیوی‌ها، ربات‌های استارت‌شده، کامنت‌های اول و فعالیت‌های ۲۴ ساعت اخیر نمایش داده می‌شود."
     ),
 ]
@@ -2715,7 +2836,7 @@ def build_features_guide_keyboard(current_page: int = 0) -> InlineKeyboardMarkup
         nav_row.append(p_btn("صفحه بعد ➡️", callback_data=f"self:features_guide:{current_page + 1}", style="primary"))
     rows.append(nav_row)
 
-    # دکمه‌های دسترسی سریع به هر ۹ صفحه (هر صفحه شامل ۵ قابلیت)
+    # دکمه‌های دسترسی سریع به هر ۹ صفحه
     page_labels = [
         (0, "۱ تا ۵"),
         (1, "۶ تا ۱۰"),
@@ -2725,7 +2846,7 @@ def build_features_guide_keyboard(current_page: int = 0) -> InlineKeyboardMarkup
         (5, "۲۶ تا ۳۰"),
         (6, "۳۱ تا ۳۵"),
         (7, "۳۶ تا ۴۰"),
-        (8, "۴۱ تا ۴۵"),
+        (8, "۴۱ تا ۴۶"),
     ]
     for i in range(0, len(page_labels), 3):
         chunk = page_labels[i : i + 3]
@@ -2737,7 +2858,7 @@ def build_features_guide_keyboard(current_page: int = 0) -> InlineKeyboardMarkup
         rows.append(r)
 
     rows.append([
-        p_btn("⚙️ ورود به مدیریت ۴۵ قابلیت سلف", callback_data="self:features_page:0", style="success", emoji_key="sparkles"),
+        p_btn("⚙️ ورود به مدیریت ۴۶ قابلیت سلف", callback_data="self:features_page:0", style="success", emoji_key="sparkles"),
     ])
     rows.append([
         p_btn("🚀 بخش فعال‌سازی و وضعیت سلف", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
@@ -6189,6 +6310,274 @@ async def chbtn_step6_publish(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 # ====================================================================
+#  ۵.۵ ساخت چالش لایکی برای کانال (با شرط عضویت اجباری در کانال و پس گرفتن لایک)
+# ====================================================================
+
+def build_like_challenge_keyboard(item_id: int, participant_name: str, likes_count: int) -> InlineKeyboardMarkup:
+    short_name = (participant_name or "شرکت‌کننده").strip()[:28]
+    return InlineKeyboardMarkup([
+        [
+            p_btn(
+                f"❤️ {short_name} | {likes_count} لایک",
+                callback_data=f"likechal_vote:{item_id}",
+                style="danger",
+                emoji_key="heart"
+            )
+        ]
+    ])
+
+async def likechal_create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["likechal_draft"] = {"posted_count": 0}
+    await query.edit_message_text(
+        p_text(
+            "❤️ <b>ساخت چالش لایکی برای کانال (مرحله ۱ از ۲: لینک کانال)</b>\n\n"
+            "⚠️ <i>توجه: ربات باید در کانال مورد نظر <b>ادمین</b> باشد تا بتواند اسم‌ها را با دکمه شیشه‌ای لایک ارسال کند و عضویت لایک‌کنندگان را بررسی نماید.</i>\n\n"
+            "👇 لطفاً <b>لینک یا آیدی کانالی</b> که می‌خواهید چالش لایکی در آن ارسال شود را بفرستید:\n"
+            "<i>(مثال: <code>@MyChannel</code> یا <code>https://t.me/MyChannel</code>)</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=cancel_inline_keyboard("self:features_page:4")
+    )
+    return LIKECHAL_WAIT_CHANNEL
+
+async def likechal_step1_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_ch = (update.message.text or "").strip()
+    target_ch = normalize_channel_identifier(raw_ch)
+
+    try:
+        bot_me = await context.bot.get_me()
+        chat = await context.bot.get_chat(chat_id=target_ch)
+        bot_member = await context.bot.get_chat_member(chat_id=chat.id, user_id=bot_me.id)
+        if bot_member.status not in ("administrator", "creator"):
+            await update.message.reply_text(
+                p_text(
+                    "❌ <b>ربات در این کانال ادمین نیست!</b>\n"
+                    "لطفاً ابتدا ربات را در کانال خود <b>ادمین (Administrator)</b> کنید و سپس مجدداً لینک یا آیدی کانال را بفرستید:"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=cancel_inline_keyboard("self:features_page:4")
+            )
+            return LIKECHAL_WAIT_CHANNEL
+
+        ch_id_store = f"@{chat.username}" if chat.username else str(chat.id)
+        ch_title = chat.title or target_ch
+    except Exception as e:
+        await update.message.reply_text(
+            p_text(
+                f"❌ <b>خطا در دسترسی به کانال <code>{html.escape(target_ch)}</code>!</b>\n"
+                f"مطمئن شوید ربات در کانال ادمین است و لینک/آیدی کانال را درست وارد کرده‌اید:\n"
+                f"<code>{html.escape(str(e)[:100])}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=cancel_inline_keyboard("self:features_page:4")
+        )
+        return LIKECHAL_WAIT_CHANNEL
+
+    context.user_data["likechal_draft"] = {
+        "channel_id": ch_id_store,
+        "channel_num_id": chat.id,
+        "channel_title": ch_title,
+        "posted_count": 0,
+    }
+
+    kb = InlineKeyboardMarkup([
+        [p_btn("✅ اتمام ساخت چالش لایکی و بازگشت", callback_data="likechal:finish", style="success", emoji_key="check")],
+        [p_btn("انصراف و بازگشت", callback_data="self:features_page:4", style="danger", emoji_key="fire")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            f"✅ <b>کانال «{html.escape(ch_title)}» با موفقیت انتخاب شد!</b>\n\n"
+            f"👤 <b>مرحله ۲ از ۲: ارسال اسم شرکت‌کنندگان</b>\n"
+            f"👇 حالا <b>اسم (یا اسم‌ها)</b> را بفرستید (هر چند تا که می‌خواهید!):\n"
+            f"• می‌توانید اسم‌ها را <b>یکی‌یکی در پیام‌های جداگانه</b> بفرستید.\n"
+            f"• یا <b>چند اسم را در خط‌های جداگانه زیر هم</b> در یک پیام بفرستید.\n\n"
+            f"❤️ به محض ارسال هر اسم، همان لحظه با <b>دکمه شیشه‌ای لایک</b> در کانال ارسال می‌شود!"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LIKECHAL_WAIT_NAMES
+
+async def likechal_step2_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    draft = context.user_data.get("likechal_draft")
+    if not draft or not draft.get("channel_id"):
+        await update.message.reply_text(
+            p_text("⚠️ نشست ساخت چالش لایکی منقضی شده است. لطفاً مجدداً از بخش قابلیت‌های سلف اقدام کنید."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_inline_keyboard(user.id)
+        )
+        return ConversationHandler.END
+
+    names = [ln.strip() for ln in (update.message.text or "").splitlines() if ln.strip()]
+    if not names:
+        await update.message.reply_text(p_text("⚠️ لطفاً حداقل یک اسم ارسال کنید:"), parse_mode=ParseMode.HTML)
+        return LIKECHAL_WAIT_NAMES
+
+    ch_id = draft["channel_id"]
+    ch_title = draft.get("channel_title", ch_id)
+    sent_now = 0
+
+    for part_name in names:
+        with closing(get_conn()) as conn, conn:
+            cur = conn.execute(
+                """INSERT INTO like_challenge_items (creator_id, channel_id, channel_title, participant_name, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user.id, str(draft.get("channel_num_id") or ch_id), ch_title, part_name, datetime.now().isoformat())
+            )
+            item_id = cur.lastrowid
+
+        post_text = p_text(
+            f"🔥 <b>چالش لایکی کانال {html.escape(ch_title)}</b>\n\n"
+            f"👤 شرکت‌کننده: <b>{html.escape(part_name)}</b>\n\n"
+            f"👇 برای لایک کردن <b>{html.escape(part_name)}</b> روی دکمه شیشه‌ای زیر بزنید:"
+        )
+        post_kb = build_like_challenge_keyboard(item_id, part_name, 0)
+
+        try:
+            sent_msg = await context.bot.send_message(
+                chat_id=ch_id,
+                text=post_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=post_kb
+            )
+            with closing(get_conn()) as conn, conn:
+                conn.execute(
+                    "UPDATE like_challenge_items SET message_id=?, channel_id=? WHERE id=?",
+                    (sent_msg.message_id, str(sent_msg.chat.id), item_id)
+                )
+            sent_now += 1
+            draft["posted_count"] = draft.get("posted_count", 0) + 1
+        except Exception as e:
+            with closing(get_conn()) as conn, conn:
+                conn.execute("DELETE FROM like_challenge_items WHERE id=?", (item_id,))
+            await update.message.reply_text(
+                p_text(
+                    f"❌ خطا در ارسال «{html.escape(part_name)}» به کانال:\n"
+                    f"<code>{html.escape(str(e)[:100])}</code>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+
+    kb = InlineKeyboardMarkup([
+        [p_btn(f"✅ اتمام ساخت چالش لایکی ({draft.get('posted_count', 0)} اسم ارسال شد)", callback_data="likechal:finish", style="success", emoji_key="check")],
+        [p_btn("بازگشت به قابلیت‌های سلف", callback_data="self:features_page:4", style="primary", emoji_key="sparkles")]
+    ])
+    await update.message.reply_text(
+        p_text(
+            f"✅ <b>{sent_now} اسم جدید</b> با دکمه شیشه‌ای لایک در کانال <b>{html.escape(ch_title)}</b> ارسال شد! (مجموع ارسال‌شده: <b>{draft.get('posted_count', 0)} اسم</b>)\n\n"
+            f"👇 اگر باز هم اسم دیگری دارید همین الان بفرستید تا در کانال پست شود، و هر زمان تمام شد روی دکمه سبز زیر بزنید:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    return LIKECHAL_WAIT_NAMES
+
+async def likechal_finish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    draft = context.user_data.pop("likechal_draft", {}) or {}
+    total_posted = draft.get("posted_count", 0)
+    ch_title = draft.get("channel_title", "کانال")
+
+    await query.answer("✅ ساخت چالش لایکی به پایان رسید!")
+    await query.edit_message_text(
+        p_text(
+            f"🎉 <b>چالش لایکی شما در کانال «{html.escape(ch_title)}» با موفقیت فعال شد!</b>\n\n"
+            f"👥 تعداد اسم‌های ارسال‌شده با دکمه شیشه‌ای لایک: <b>{total_posted} مورد</b>\n"
+            f"🛡 <b>قانون ضد تقلب فعال است:</b> فقط کسانی که عضو کانال باشند می‌توانند لایک کنند و با کلیک مجدد نیز لایک پس گرفته می‌شود."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_inline_keyboard(user.id)
+    )
+    return ConversationHandler.END
+
+async def likechal_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مدیریت کلیک روی دکمه شیشه‌ای لایک در کانال (بررسی عضویت اجباری در کانال + ثبت لایک یا پس گرفتن لایک)"""
+    query = update.callback_query
+    voter = query.from_user
+    data = query.data
+
+    if not data.startswith("likechal_vote:"):
+        return
+
+    try:
+        item_id = int(data.split(":")[1])
+    except ValueError:
+        await query.answer("⚠️ چالش معتبر نیست.", show_alert=True)
+        return
+
+    with closing(get_conn()) as conn:
+        item = conn.execute("SELECT * FROM like_challenge_items WHERE id=?", (item_id,)).fetchone()
+
+    if not item:
+        await query.answer("⚠️ این آیتم چالش یافت نشد.", show_alert=True)
+        return
+
+    # ۱. بررسی حتمی عضویت کاربر در کانالی که چالش در آن قرار دارد
+    target_chat_id = query.message.chat.id if (query.message and query.message.chat) else item["channel_id"]
+    is_channel_member = False
+    try:
+        member = await context.bot.get_chat_member(chat_id=target_chat_id, user_id=voter.id)
+        if member.status in ("creator", "administrator", "member"):
+            is_channel_member = True
+        elif member.status == "restricted" and getattr(member, "is_member", False):
+            is_channel_member = True
+    except Exception as e:
+        logger.debug(f"Like challenge membership check error: {e}")
+        is_channel_member = False
+
+    if not is_channel_member:
+        await query.answer(
+            "⛔ شما عضو این کانال نیستید!\nبرای اینکه لایک شما ثبت و حساب شود، ابتدا باید در همین کانال عضو شوید.",
+            show_alert=True
+        )
+        return
+
+    # ۲. ثبت لایک جدید یا پس گرفتن لایک در صورت کلیک مجدد
+    with closing(get_conn()) as conn, conn:
+        existing_vote = conn.execute(
+            "SELECT 1 FROM like_challenge_votes WHERE item_id=? AND user_id=?",
+            (item_id, voter.id)
+        ).fetchone()
+
+        if existing_vote:
+            conn.execute(
+                "DELETE FROM like_challenge_votes WHERE item_id=? AND user_id=?",
+                (item_id, voter.id)
+            )
+            was_unliked = True
+        else:
+            conn.execute(
+                "INSERT INTO like_challenge_votes (item_id, user_id, created_at) VALUES (?, ?, ?)",
+                (item_id, voter.id, datetime.now().isoformat())
+            )
+            was_unliked = False
+
+        new_likes_count = conn.execute(
+            "SELECT COUNT(*) c FROM like_challenge_votes WHERE item_id=?",
+            (item_id,)
+        ).fetchone()["c"]
+
+    part_name = item["participant_name"]
+
+    # ۳. بروزرسانی آنی دکمه شیشه‌ای لایک در کانال
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=build_like_challenge_keyboard(item_id, part_name, new_likes_count)
+        )
+    except Exception as e:
+        logger.debug(f"Update like challenge button error: {e}")
+
+    if was_unliked:
+        await query.answer(f"💔 لایک شما برای «{part_name}» پس گرفته شد! (تعداد لایک: {new_likes_count})", show_alert=False)
+    else:
+        await query.answer(f"❤️ لایک شما برای «{part_name}» ثبت شد! (تعداد لایک: {new_likes_count})", show_alert=False)
+
+
+# ====================================================================
 #  ۶. قابلیت‌های گروهی ربات: «موجودی»، «بازی [مبلغ]» و ریپلای «انتقال [مبلغ]»
 # ====================================================================
 
@@ -6709,6 +7098,25 @@ def main():
         allow_reentry=True,
     )
 
+    # ۹.۵ مکالمه ساخت چالش لایکی برای کانال
+    likechal_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(likechal_create_start, pattern="^likechal:start$")],
+        states={
+            LIKECHAL_WAIT_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, likechal_step1_channel)],
+            LIKECHAL_WAIT_NAMES: [
+                CallbackQueryHandler(likechal_finish_callback, pattern="^likechal:finish$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, likechal_step2_names),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(likechal_finish_callback, pattern="^likechal:finish$"),
+            CallbackQueryHandler(self_features_callbacks, pattern="^self:features_page:"),
+            CallbackQueryHandler(menu_router_callback, pattern="^menu:"),
+            CommandHandler("start", start_cmd),
+        ],
+        allow_reentry=True,
+    )
+
     # ۱۰. مکالمه پنل مدیریت ۴۰ قابلیته (شامل بکاپ کامل، بازگردانی بکاپ، الماس همگانی با متن دلخواه و ساخت کد هدیه مرحله‌ای)
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_router_callback, pattern="^adm:")],
@@ -6745,6 +7153,7 @@ def main():
     app.add_handler(pvforce_conv)
     app.add_handler(lotto_conv)
     app.add_handler(chbtn_conv)
+    app.add_handler(likechal_conv)
     app.add_handler(admin_conv)
     app.add_handler(CommandHandler("start", start_cmd))
 
@@ -6756,6 +7165,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pv_force_menu_callback, pattern="^pvforce:(menu|toggle|del:)"))
     app.add_handler(CallbackQueryHandler(pv_check_callback, pattern="^pvcheck:"))
     app.add_handler(CallbackQueryHandler(lottery_callbacks_handler, pattern="^(lottocnt:|lottocheck:)"))
+    app.add_handler(CallbackQueryHandler(likechal_vote_callback, pattern="^likechal_vote:"))
     app.add_handler(CallbackQueryHandler(group_callbacks_handler, pattern="^(grpbal:|grpgame:)"))
     app.add_handler(CallbackQueryHandler(self_features_callbacks, pattern="^(self:features_page:|self:features_guide:|ftoggle:|fbulk:)"))
     app.add_handler(CallbackQueryHandler(tabchi_menu_callback, pattern="^(menu:tabchi|tabchi:)"))
@@ -6768,7 +7178,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_commands_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, fallback_pending_login_text_handler))
 
-    logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۵ قابلیت سلف، قابلیت‌های گروهی، قرعه‌کشی، تیکتینگ و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
+    logger.info("🌑 ربات سلف دارک (Self Dark) با ۴۶ قابلیت سلف، چالش لایکی کانال، لیدربورد، هدیه ورود ۶۰ الماس و پینگر ۵ دقیقه‌ای Render آماده به کار است.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
