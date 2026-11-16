@@ -2375,10 +2375,6 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
             p_btn(f"فعالسازی و اتصال سلف دارک ({self_status})", callback_data="menu:activate_self", style="primary", emoji_key="rocket"),
         ],
         [
-            p_btn("مدیریت ۴۶ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles"),
-            p_btn("📖 توضیحات قابلیت‌ها (۴۶ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap"),
-        ],
-        [
             p_btn("تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
         ],
         [
@@ -2386,7 +2382,7 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
             p_btn("انتقال الماس به دیگران", callback_data="menu:transfer_diamonds", style="primary", emoji_key="sparkles"),
         ],
         [
-            p_btn("زیرمجموعه‌گیری (۵ الماس رایگان)", callback_data="menu:referral", style="primary", emoji_key="gift"),
+            p_btn("زیرمجموعه‌گیری", callback_data="menu:referral", style="primary", emoji_key="gift"),
             p_btn("هدیه روزانه و کد هدیه", callback_data="menu:daily_gift", style="success", emoji_key="party"),
         ],
         [
@@ -3731,12 +3727,12 @@ async def activate_self_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(
             p_text(
                 f"✅ <b>سلف دارک شما هم‌اکنون روی شماره <code>{acc['phone']}</code> فعال و روشن است!</b>\n\n"
-                f"📖 از دکمه <b>«توضیحات قابلیت‌ها»</b> می‌توانید آموزش کامل و دقیق نحوه استفاده از تمامی <b>۴۵ قابلیت سلف دارک</b> را در ۹ صفحه مطالعه کنید یا قابلیت‌ها را مدیریت نمایید:"
+                f"📖 از دکمه <b>«توضیحات قابلیت‌ها»</b> می‌توانید آموزش کامل و دقیق نحوه استفاده از تمامی <b>۴۶ قابلیت سلف دارک</b> را در ۹ صفحه مطالعه کنید یا قابلیت‌ها را مدیریت نمایید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [p_btn("⚙️ مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
-                [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
+                [p_btn("⚙️ مدیریت ۴۶ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+                [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۶ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
                 [
                     p_btn("📣 تبچی هوشمند", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
                     p_btn("📊 پنل مرکزی ۲۴ ساعته", callback_data="self:central_panel", style="primary", emoji_key="crown"),
@@ -4115,19 +4111,22 @@ async def finalize_self_dark_login(update: Update, context: ContextTypes.DEFAULT
     await start_single_self_client(user.id, session_str)
 
     target_msg = update.effective_message
-    # ارسال پیام تبریک به کاربر همراه با دکمه توضیحات کامل ۴۵ قابلیت
+    # ارسال پیام تبریک به کاربر همراه با دکمه‌های مدیریت ۴۶ قابلیت و توضیحات کامل ۴۶ قابلیت در بخش سلف
     await target_msg.reply_text(
         p_text(
             f"🎉 <b>تبریک! «سلف دارک | Self Dark» با موفقیت روی اکانت شما فعال شد!</b>\n\n"
             f"📱 شماره متصل: <code>{phone}</code>\n"
             f"💎 هزینه کسر شده فعال‌سازی: <b>{act_cost} الماس</b> (ساعتی {hr_cost} الماس)\n\n"
-            f"✨ هم‌اکنون می‌توانید از دکمه‌های زیر <b>۴۵ قابلیت سلف دارک</b> را شخصی‌سازی کنید و در بخش <b>«📖 توضیحات قابلیت‌ها»</b> نحوه استفاده دقیق از تک‌تک ۴۵ قابلیت را مشاهده نمایید:"
+            f"✨ هم‌اکنون می‌توانید از دکمه‌های زیر <b>۴۶ قابلیت سلف دارک</b> را شخصی‌سازی کنید و در بخش <b>«📖 توضیحات قابلیت‌ها»</b> نحوه استفاده دقیق از تک‌تک ۴۶ قابلیت را مشاهده نمایید:"
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [p_btn("⚙️ مدیریت ۴۵ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
-            [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۵ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
-            [p_btn("📣 مدیریت تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="success", emoji_key="megaphone")],
+            [p_btn("⚙️ مدیریت ۴۶ قابلیت سلف دارک", callback_data="self:features_page:0", style="primary", emoji_key="sparkles")],
+            [p_btn("📖 توضیحات قابلیت‌ها (آموزش کامل ۴۶ قابلیت)", callback_data="self:features_guide:0", style="success", emoji_key="zap")],
+            [
+                p_btn("📣 تبچی هوشمند", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
+                p_btn("📊 پنل مرکزی ۲۴ ساعته", callback_data="self:central_panel", style="primary", emoji_key="crown"),
+            ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="primary", emoji_key="glow")]
         ])
     )
