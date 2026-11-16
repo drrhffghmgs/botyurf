@@ -2380,7 +2380,6 @@ def main_inline_keyboard(user_id: int) -> InlineKeyboardMarkup:
         ],
         [
             p_btn("تبچی هوشمند سلف دارک", callback_data="menu:tabchi", style="primary", emoji_key="megaphone"),
-            p_btn("📊 پنل مرکزی (گزارش ۲۴ ساعته)", callback_data="self:central_panel", style="primary", emoji_key="crown"),
         ],
         [
             p_btn("خرید الماس (TON / ریالی)", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
@@ -2619,8 +2618,42 @@ def cancel_inline_keyboard(back_cb: str = "menu:main") -> InlineKeyboardMarkup:
 #  هندلر شروع (/start) و منوهای اصلی سلف دارک
 # ====================================================================
 
+async def send_big_fire_reaction_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ثبت ری‌اکشن بزرگ آتش (🔥 با is_big=True) روی پیام /start کاربر"""
+    if not update.effective_message or not update.effective_chat:
+        return
+    chat_id = update.effective_chat.id
+    msg_id = update.effective_message.message_id
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reaction=["🔥"],
+            is_big=True,
+        )
+        return
+    except Exception:
+        pass
+    try:
+        await asyncio.to_thread(
+            requests.post,
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setMessageReaction",
+            json={
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "reaction": [{"type": "emoji", "emoji": "🔥"}],
+                "is_big": True,
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        logger.debug(f"Start fire reaction error: {e}")
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # زدن ری‌اکشن بزرگ آتش 🔥 روی پیام استارت کاربر در هر بار ارسال /start
+    await send_big_fire_reaction_on_start(update, context)
+
     invited_by = None
     if context.args and len(context.args) > 0:
         arg = context.args[0]
@@ -7704,3 +7737,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
