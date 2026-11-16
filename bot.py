@@ -338,7 +338,11 @@ def init_db():
                 referrals_count INTEGER DEFAULT 0,
                 is_banned INTEGER DEFAULT 0,
                 last_daily_gift TEXT DEFAULT NULL,
-                welcome_gift_claimed INTEGER DEFAULT 0
+                welcome_gift_claimed INTEGER DEFAULT 0,
+                user_level INTEGER DEFAULT 1,
+                lvl4_bonus_claimed INTEGER DEFAULT 0,
+                lvl5_bonus_claimed INTEGER DEFAULT 0,
+                last_wheel_spin TEXT DEFAULT NULL
             );
 
             CREATE TABLE IF NOT EXISTS self_accounts (
@@ -516,6 +520,14 @@ def init_db():
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (item_id, user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS user_group_game_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                game_id INTEGER NOT NULL,
+                played_at TEXT NOT NULL,
+                rewarded INTEGER DEFAULT 0
+            );
         """)
 
         # ارتقای بدون خطای جداول برای دیتابیس‌های قبلی
@@ -524,6 +536,10 @@ def init_db():
             "ALTER TABLE edited_cache ADD COLUMN edited_text TEXT DEFAULT NULL",
             "ALTER TABLE edited_cache ADD COLUMN created_at TEXT DEFAULT NULL",
             "ALTER TABLE users ADD COLUMN welcome_gift_claimed INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN user_level INTEGER DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN lvl4_bonus_claimed INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN lvl5_bonus_claimed INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_wheel_spin TEXT DEFAULT NULL",
         ]:
             try:
                 conn.execute(col_sql)
@@ -614,6 +630,192 @@ def get_or_create_user(user_id: int, username: str = "", first_name: str = "", i
             )
         return user
 
+# ====================================================================
+#  سیستم لول‌بندی ۱ تا ۵، پاداش زیرمجموعه بر اساس لول و چالش ۳۰۰ بازی در ۲۴ ساعت
+# ====================================================================
+
+LEVEL_CONFIG = {
+    1: {"req": 0,     "ref_reward": 5,   "bonus": 0,    "title": "لول ۱ (مبتدی)"},
+    2: {"req": 1500,  "ref_reward": 20,  "bonus": 0,    "title": "لول ۲ (نقره‌ای)"},
+    3: {"req": 3000,  "ref_reward": 40,  "bonus": 0,    "title": "لول ۳ (طلایی)"},
+    4: {"req": 6000,  "ref_reward": 80,  "bonus": 400,  "title": "لول ۴ (الماسی)"},
+    5: {"req": 10000, "ref_reward": 150, "bonus": 1000, "title": "لول ۵ (افسانه‌ای - آخرین لول)"},
+}
+
+def check_and_upgrade_user_level(user_id: int) -> list:
+    """
+    بررسی موجودی الماس کاربر و ارتقای خودکار لول (۱ تا ۵):
+    - لول ۱: پیش‌فرض همه کاربران (پاداش زیرمجموعه: ۵ الماس)
+    - لول ۲: رسیدن موجودی به ۱,۵۰۰ الماس (پاداش زیرمجموعه: ۲۰ الماس)
+    - لول ۳: رسیدن موجودی به ۳,۰۰۰ الماس (پاداش زیرمجموعه: ۴۰ الماس)
+    - لول ۴: رسیدن موجودی به ۶,۰۰۰ الماس (+۴۰۰ الماس هدیه رسیدن به لول ۴ | پاداش زیرمجموعه: ۸۰ الماس)
+    - لول ۵: رسیدن موجودی به ۱۰,۰۰۰ الماس (+۱,۰۰۰ الماس هدیه رسیدن به لول ۵ | پاداش زیرمجموعه: ۱۵۰ الماس)
+    """
+    events = []
+    with closing(get_conn()) as conn, conn:
+        row = conn.execute(
+            "SELECT diamonds, COALESCE(user_level, 1) AS ulvl, COALESCE(lvl4_bonus_claimed, 0) AS b4, COALESCE(lvl5_bonus_claimed, 0) AS b5 FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        if not row:
+            return events
+
+        diamonds = int(row["diamonds"] or 0)
+        cur_lvl = max(1, int(row["ulvl"] or 1))
+        b4 = int(row["b4"] or 0)
+        b5 = int(row["b5"] or 0)
+
+        while cur_lvl < 5:
+            next_lvl = cur_lvl + 1
+            req_d = LEVEL_CONFIG[next_lvl]["req"]
+            if diamonds >= req_d:
+                cur_lvl = next_lvl
+                bonus_given = 0
+                if cur_lvl == 4 and b4 == 0:
+                    bonus_given = 400
+                    diamonds += bonus_given
+                    b4 = 1
+                elif cur_lvl == 5 and b5 == 0:
+                    bonus_given = 1000
+                    diamonds += bonus_given
+                    b5 = 1
+
+                conn.execute(
+                    "UPDATE users SET user_level=?, diamonds=?, lvl4_bonus_claimed=?, lvl5_bonus_claimed=? WHERE user_id=?",
+                    (cur_lvl, diamonds, b4, b5, user_id)
+                )
+                events.append((cur_lvl, bonus_given, LEVEL_CONFIG[cur_lvl]["ref_reward"], diamonds))
+            else:
+                break
+
+    if events and BOT_APP_REF is not None:
+        async def _notify_level_up():
+            for lvl, bonus, ref_rew, new_bal in events:
+                try:
+                    bonus_line = (
+                        f"🎁 <b>هدیه ویژه رسیدن به لول {lvl}:</b> <b>+{bonus:,} الماس رایگان</b> به حساب شما اضافه شد!\n"
+                        if bonus > 0 else ""
+                    )
+                    await BOT_APP_REF.bot.send_message(
+                        chat_id=user_id,
+                        text=p_text(
+                            f"🏆 <b>تبریک! ارتقای سطح (Level Up) در سلف دارک!</b>\n\n"
+                            f"🌟 شما با موفقیت به <b>{LEVEL_CONFIG[lvl]['title']}</b> رسیدید!\n"
+                            f"{bonus_line}"
+                            f"👥 <b>پاداش جدید هر زیرمجموعه شما:</b> <b>{ref_rew:,} الماس</b>\n"
+                            f"💎 <b>موجودی فعلی شما:</b> <b>{new_bal:,} الماس</b>"
+                        ),
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_notify_level_up())
+        except Exception:
+            pass
+
+    return events
+
+def get_user_level_info(user_id: int) -> dict:
+    """دریافت اطلاعات کامل لول کاربر، پاداش زیرمجموعه فعلی و فاصله تا لول بعدی"""
+    check_and_upgrade_user_level(user_id)
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT diamonds, COALESCE(user_level, 1) AS ulvl FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+    if not row:
+        lvl = 1
+        diamonds = 0
+    else:
+        lvl = max(1, min(5, int(row["ulvl"] or 1)))
+        diamonds = int(row["diamonds"] or 0)
+
+    cfg = LEVEL_CONFIG[lvl]
+    if lvl < 5:
+        next_lvl = lvl + 1
+        next_req = LEVEL_CONFIG[next_lvl]["req"]
+        rem = max(0, next_req - diamonds)
+    else:
+        next_lvl = None
+        next_req = None
+        rem = 0
+
+    return {
+        "level": lvl,
+        "title": cfg["title"],
+        "ref_reward": cfg["ref_reward"],
+        "diamonds": diamonds,
+        "next_level": next_lvl,
+        "next_req": next_req,
+        "remaining": rem,
+    }
+
+def get_user_24h_unrewarded_games_count(user_id: int) -> int:
+    cutoff_iso = (datetime.now() - timedelta(hours=24)).isoformat()
+    with closing(get_conn()) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM user_group_game_logs WHERE user_id=? AND rewarded=0 AND played_at >= ?",
+            (user_id, cutoff_iso)
+        ).fetchone()
+        return int(row["c"] if row else 0)
+
+def record_group_game_and_check_300_challenge(user_id: int, game_id: int) -> tuple[bool, int]:
+    """
+    ثبت بازی گروهی برای کاربر و بررسی چالش ۳۰۰ بازی در کمتر از ۲۴ ساعت:
+    اگر کاربر در کمتر از ۲۴ ساعت ۳۰۰ بازی انجام دهد، بلافاصله ۲۰۰ الماس هدیه می‌گیرد.
+    خروجی: (آیا ۲۰۰ الماس برنده شد؟، تعداد بازی‌های ۲۴ ساعت اخیر)
+    """
+    now_iso = datetime.now().isoformat()
+    cutoff_iso = (datetime.now() - timedelta(hours=24)).isoformat()
+    old_cutoff_iso = (datetime.now() - timedelta(hours=48)).isoformat()
+    won_challenge = False
+
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "INSERT INTO user_group_game_logs (user_id, game_id, played_at, rewarded) VALUES (?, ?, ?, 0)",
+            (user_id, game_id, now_iso)
+        )
+        if random.random() < 0.05:
+            conn.execute("DELETE FROM user_group_game_logs WHERE played_at < ?", (old_cutoff_iso,))
+
+        cnt_row = conn.execute(
+            "SELECT COUNT(*) c FROM user_group_game_logs WHERE user_id=? AND rewarded=0 AND played_at >= ?",
+            (user_id, cutoff_iso)
+        ).fetchone()
+        cnt = int(cnt_row["c"] if cnt_row else 0)
+
+        if cnt >= 300:
+            conn.execute(
+                "UPDATE user_group_game_logs SET rewarded=1 WHERE user_id=? AND rewarded=0 AND played_at >= ?",
+                (user_id, cutoff_iso)
+            )
+            conn.execute("UPDATE users SET diamonds = diamonds + 200 WHERE user_id=?", (user_id,))
+            won_challenge = True
+            cnt = 300
+
+    if won_challenge:
+        check_and_upgrade_user_level(user_id)
+    return won_challenge, cnt
+
+def spin_weighted_wheel_reward() -> int:
+    """
+    قرعه‌کشی گردونه شانس روزانه بین ۱ تا ۴۰ الماس:
+    احتمال اینکه عددی زیر ۱۰ الماس (۱ تا ۹ الماس) بدهد بسیار بیشتر است (۸۰٪ احتمال زیر ۱۰ الماس).
+    """
+    roll = secrets.randbelow(100)
+    if roll < 80:
+        # ۸۰٪ احتمال: عدد زیر ۱۰ الماس (۱ تا ۹ الماس)
+        return secrets.randbelow(9) + 1
+    elif roll < 95:
+        # ۱۵٪ احتمال: بین ۱۰ تا ۲۰ الماس
+        return secrets.randbelow(11) + 10
+    else:
+        # ۵٪ احتمال: بین ۲۱ تا ۴۰ الماس
+        return secrets.randbelow(20) + 21
+
 def grant_first_entry_gift_if_eligible(user_id: int) -> int:
     """
     اعطای ۶۰ الماس هدیه ورود اولیه به هر کاربر (فقط یک‌بار):
@@ -627,20 +829,25 @@ def grant_first_entry_gift_if_eligible(user_id: int) -> int:
     except Exception:
         gift_amount = 60
 
+    claimed = 0
     with closing(get_conn()) as conn, conn:
         cur = conn.execute(
             "UPDATE users SET diamonds = diamonds + ?, welcome_gift_claimed = 1 WHERE user_id = ? AND COALESCE(welcome_gift_claimed, 0) = 0",
             (gift_amount, user_id)
         )
         if cur.rowcount > 0:
-            return gift_amount
-    return 0
+            claimed = gift_amount
+    if claimed > 0:
+        check_and_upgrade_user_level(user_id)
+    return claimed
 
 def add_user_diamonds(user_id: int, delta: int):
     with closing(get_conn()) as conn, conn:
         conn.execute("UPDATE users SET diamonds = MAX(0, diamonds + ?) WHERE user_id=?", (delta, user_id))
         if delta < 0:
             conn.execute("UPDATE users SET total_spent_diamonds = total_spent_diamonds + ? WHERE user_id=?", (abs(delta), user_id))
+    if delta > 0:
+        check_and_upgrade_user_level(user_id)
 
 def get_self_account(user_id: int):
     with closing(get_conn()) as conn:
@@ -696,12 +903,18 @@ async def verify_referral_if_eligible(bot, user_id: int):
         if not user or not user["invited_by"] or user["referral_verified"] == 1:
             return
         inviter_id = user["invited_by"]
-        reward = int(get_setting("referral_reward", "5"))
+        inv_row = conn.execute("SELECT COALESCE(user_level, 1) AS ulvl FROM users WHERE user_id=?", (inviter_id,)).fetchone()
+        inv_lvl = max(1, min(5, int(inv_row["ulvl"] or 1))) if inv_row else 1
+        reward = LEVEL_CONFIG[inv_lvl]["ref_reward"]
+
         conn.execute("UPDATE users SET referral_verified=1 WHERE user_id=?", (user_id,))
         conn.execute(
             "UPDATE users SET referrals_count = referrals_count + 1, diamonds = diamonds + ? WHERE user_id=?",
             (reward, inviter_id)
         )
+
+    check_and_upgrade_user_level(inviter_id)
+    with closing(get_conn()) as conn:
         inviter = conn.execute("SELECT * FROM users WHERE user_id=?", (inviter_id,)).fetchone()
 
     if inviter:
@@ -710,9 +923,10 @@ async def verify_referral_if_eligible(bot, user_id: int):
                 chat_id=inviter_id,
                 text=p_text(
                     f"🎉 <b>زیرمجموعه جدید در سلف دارک تایید شد!</b>\n\n"
-                    f"👤 کاربر <b>{html.escape(user['first_name'])}</b> در کانال‌های ربات عضو شد.\n"
-                    f"💎 پاداش شما: <b>+{reward} الماس</b> به حساب شما اضافه شد!\n"
-                    f"💰 موجودی فعلی شما: <b>{inviter['diamonds']} الماس</b>"
+                    f"👤 کاربر <b>{html.escape(user['first_name'])}</b> وارد ربات شد.\n"
+                    f"🏅 سطح فعلی شما: <b>لول {inv_lvl}</b>\n"
+                    f"💎 پاداش زیرمجموعه‌گیری لول {inv_lvl}: <b>+{reward:,} الماس</b> به حساب شما اضافه شد!\n"
+                    f"💰 موجودی فعلی شما: <b>{inviter['diamonds']:,} الماس</b>"
                 ),
                 parse_mode=ParseMode.HTML
             )
@@ -2417,6 +2631,8 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     elif data == "menu:profile":
+        lvl_info = get_user_level_info(user.id)
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
         acc = get_self_account(user.id)
         with closing(get_conn()) as conn:
             t_groups = conn.execute("SELECT COUNT(*) c FROM tabchi_groups WHERE user_id=?", (user.id,)).fetchone()["c"]
@@ -2424,18 +2640,35 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         hr_cost = get_setting("hourly_cost", "3")
         phone_str = acc["phone"] if acc else "ثبت نشده"
         self_st = "🟢 فعال و روشن" if (acc and acc["is_running"] == 1) else "🔴 غیرفعال"
+        games_24h = get_user_24h_unrewarded_games_count(user.id)
+
+        if lvl_info["next_level"]:
+            next_lvl_str = (
+                f"📈 فاصله تا <b>لول {lvl_info['next_level']}</b> (نیاز به {lvl_info['next_req']:,} الماس): "
+                f"<b>{lvl_info['remaining']:,} الماس دیگر</b>"
+            )
+        else:
+            next_lvl_str = "👑 <b>شما در بالاترین سطح ربات (لول ۵ — حداکثر لول) قرار دارید!</b>"
 
         text = p_text(
-            f"👤 <b>حساب کاربری شما در سلف دارک</b>\n\n"
+            f"👤 <b>حساب کاربری و سطح (Level) شما در سلف دارک</b>\n\n"
             f"🔢 آیدی عددی: <code>{user.id}</code>\n"
-            f" نام: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
-            f"💎 موجودی فعلی الماس: <b>{db_user['diamonds']} الماس</b>\n"
-            f"🔥 کل الماس مصرف‌شده: <b>{db_user['total_spent_diamonds']} الماس</b>\n"
-            f"👥 زیرمجموعه‌های تاییدشده: <b>{db_user['referrals_count']} نفر</b>\n\n"
-            f"🌑 <b>وضعیت سلف دارک:</b> <b>{self_st}</b>\n"
-            f"📱 شماره متصل: <code>{phone_str}</code>\n"
-            f"📣 گروه‌های ثبت‌شده در تبچی: <b>{t_groups} گروه</b>\n"
-            f"💰 تعرفه مصرف: <b>{act_cost} الماس فعال‌سازی | ساعتی {hr_cost} الماس</b>"
+            f"👤 نام: <b>{html.escape(user.first_name)}</b> (@{user.username or 'ندارد'})\n"
+            f"💎 موجودی فعلی الماس: <b>{db_user['diamonds']:,} الماس</b>\n"
+            f"🔥 کل الماس مصرف‌شده: <b>{db_user['total_spent_diamonds']:,} الماس</b>\n\n"
+            f"🏅 <b>سطح (Level) فعلی شما:</b> <b>{lvl_info['title']}</b>\n"
+            f"🎁 <b>پاداش هر زیرمجموعه در لول {lvl_info['level']}:</b> <b>{lvl_info['ref_reward']:,} الماس</b>\n"
+            f"👥 زیرمجموعه‌های تاییدشده: <b>{db_user['referrals_count']} نفر</b>\n"
+            f"{next_lvl_str}\n\n"
+            f"🎮 <b>چالش بازی گروهی ۲۴ ساعت اخیر:</b> <b>{games_24h} / 300 بازی</b> (پاداش ۳۰۰ بازی در ۲۴ ساعت: <b>+۲۰۰ الماس</b>)\n\n"
+            f"📊 <b>جدول مزایا و سطوح (سیستم لول‌بندی سلف دارک):</b>\n"
+            f"• <b>لول ۱ (شروع):</b> پاداش هر زیرمجموعه <b>۵ الماس</b>\n"
+            f"• <b>لول ۲ (۱,۵۰۰ الماس):</b> پاداش هر زیرمجموعه <b>۲۰ الماس</b>\n"
+            f"• <b>لول ۳ (۳,۰۰۰ الماس):</b> پاداش هر زیرمجموعه <b>۴۰ الماس</b>\n"
+            f"• <b>لول ۴ (۶,۰۰۰ الماس):</b> <b>+۴۰۰ الماس هدیه ارتقا</b> + پاداش هر زیرمجموعه <b>۸۰ الماس</b>\n"
+            f"• <b>لول ۵ (۱۰,۰۰۰ الماس - آخر):</b> <b>+۱,۰۰۰ الماس هدیه ارتقا</b> + پاداش هر زیرمجموعه <b>۱۵۰ الماس</b>\n\n"
+            f"🌑 <b>وضعیت سلف دارک:</b> <b>{self_st}</b> | 📱 شماره: <code>{phone_str}</code>\n"
+            f"📣 گروه‌های تبچی: <b>{t_groups} گروه</b> | 💰 تعرفه: <b>{act_cost} الماس فعال‌سازی / ساعتی {hr_cost} الماس</b>"
         )
         kb = InlineKeyboardMarkup([
             [
@@ -2443,7 +2676,8 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 p_btn("انتقال الماس به دیگران", callback_data="menu:transfer_diamonds", style="primary", emoji_key="sparkles"),
             ],
             [
-                p_btn("زیرمجموعه‌گیری رایگان", callback_data="menu:referral", style="primary", emoji_key="gift"),
+                p_btn("زیرمجموعه‌گیری (طبق لول شما)", callback_data="menu:referral", style="primary", emoji_key="gift"),
+                p_btn("گردونه رایگان روزانه", callback_data="menu:daily_gift", style="success", emoji_key="crown"),
             ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
@@ -2486,22 +2720,34 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif data == "menu:referral":
         ref_enabled = get_setting("referral_enabled", "1") == "1"
-        reward = get_setting("referral_reward", "5")
+        lvl_info = get_user_level_info(user.id)
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
+        reward = lvl_info["ref_reward"]
         bot_me = await context.bot.get_me()
         ref_link = f"https://t.me/{bot_me.username}?start=ref_{user.id}"
         status_txt = "🟢 فعال" if ref_enabled else "🔴 موقتاً غیرفعال توسط مدیریت"
 
         text = p_text(
-            f"🎁 <b>کسب الماس رایگان (زیرمجموعه‌گیری سلف دارک)</b>\n\n"
+            f"🎁 <b>کسب الماس رایگان (زیرمجموعه‌گیری پلکانی سلف دارک)</b>\n\n"
             f"📊 وضعیت بخش زیرمجموعه‌گیری: <b>{status_txt}</b>\n"
-            f"💎 پاداش هر زیرمجموعه: <b>{reward} الماس رایگان</b>\n"
+            f"🏅 <b>سطح فعلی شما:</b> <b>{lvl_info['title']}</b>\n"
+            f"💎 <b>پاداش هر زیرمجموعه برای لول شما:</b> <b>{reward:,} الماس رایگان</b>\n"
             f"👥 زیرمجموعه‌های تاییدشده شما: <b>{db_user['referrals_count']} نفر</b>\n\n"
-            f"🔥 با ارسال لینک اختصاصی زیر برای دوستان خود، به ازای هر نفری که وارد ربات شده و در <b>کانال‌های جوین اجباری</b> عضو شود، بلافاصله <b>{reward} الماس</b> دریافت می‌کنید!\n\n"
+            f"📈 <b>پاداش زیرمجموعه‌گیری بر اساس لول کاربری:</b>\n"
+            f"• لول ۱ (پیش‌فرض): <b>۵ الماس</b> به ازای هر زیرمجموعه\n"
+            f"• لول ۲ (موجودی ۱,۵۰۰ الماس): <b>۲۰ الماس</b> به ازای هر زیرمجموعه\n"
+            f"• لول ۳ (موجودی ۳,۰۰۰ الماس): <b>۴۰ الماس</b> به ازای هر زیرمجموعه\n"
+            f"• لول ۴ (موجودی ۶,۰۰۰ الماس): <b>۸۰ الماس</b> به ازای هر زیرمجموعه (+۴۰۰ الماس هدیه لول ۴)\n"
+            f"• لول ۵ (موجودی ۱۰,۰۰۰ الماس): <b>۱۵۰ الماس</b> به ازای هر زیرمجموعه (+۱,۰۰۰ الماس هدیه لول ۵)\n\n"
+            f"🔥 با ارسال لینک اختصاصی زیر برای دوستان خود، به ازای هر نفری که وارد ربات شود، بلافاصله <b>{reward:,} الماس</b> دریافت می‌کنید!\n\n"
             f"🔗 <b>لینک دعوت اختصاصی شما:</b>\n"
             f"<code>{ref_link}</code>"
         )
         kb = InlineKeyboardMarkup([
-            [p_btn("خرید مستقیم الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem")],
+            [
+                p_btn("👤 مشاهده لول و حساب کاربری", callback_data="menu:profile", style="primary", emoji_key="crown"),
+                p_btn("خرید مستقیم الماس", callback_data="menu:buy_diamonds", style="success", emoji_key="gem"),
+            ],
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -2516,19 +2762,38 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     "UPDATE users SET diamonds = diamonds + ?, last_daily_gift = ? WHERE user_id=?",
                     (daily_amt, today_str, user.id)
                 )
-            msg_alert = f"🎉 تبریک! تعداد <b>{daily_amt} الماس هدیه روزانه</b> به حساب شما اضافه شد!\n\n"
+            check_and_upgrade_user_level(user.id)
+            msg_alert = f"🎉 تبریک! تعداد <b>{daily_amt} الماس هدیه روزانه ثابت</b> به حساب شما اضافه شد!\n\n"
         else:
-            msg_alert = "⏳ شما هدیه روزانه امروز خود را قبلاً دریافت کرده‌اید. فردا دوباره سر بزنید!\n\n"
+            msg_alert = "⏳ شما هدیه روزانه ثابت امروز خود را دریافت کرده‌اید.\n\n"
+
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
+        wheel_status_txt = "🟢 آماده چرخش! همین الان گردونه شانس (۱ تا ۴۰ الماس) را بچرخانید."
+        if db_user["last_wheel_spin"]:
+            try:
+                last_dt = datetime.fromisoformat(db_user["last_wheel_spin"])
+                diff = datetime.now() - last_dt
+                if diff < timedelta(hours=24):
+                    rem_sec = int((timedelta(hours=24) - diff).total_seconds())
+                    rem_h = rem_sec // 3600
+                    rem_m = (rem_sec % 3600) // 60
+                    wheel_status_txt = f"⏳ گردونه رایگان شما <b>{rem_h} ساعت و {rem_m} دقیقه</b> دیگر دوباره فعال می‌شود."
+            except Exception:
+                pass
 
         await query.edit_message_text(
             p_text(
-                f"🎁 <b>بخش هدیه روزانه و کد هدیه سلف دارک</b>\n\n"
+                f"🎁 <b>بخش هدیه روزانه، گردونه رایگان و کد هدیه سلف دارک</b>\n\n"
                 f"{msg_alert}"
-                f"✨ اگر کد هدیه الماس دارید، روی دکمه زیر کلیک کنید:"
+                f"🎡 <b>گردونه شانس رایگان ۲۴ ساعته (۱ تا ۴۰ الماس):</b>\n"
+                f"• هر ۲۴ ساعت یک‌بار می‌توانید گردونه رایگان را بچرخانید و به صورت تصادفی بین <b>۱ تا ۴۰ الماس</b> برنده شوید!\n"
+                f"• وضعیت گردونه شما: {wheel_status_txt}\n\n"
+                f"✨ برای چرخاندن گردونه رایگان یا ثبت کد هدیه از دکمه‌های زیر استفاده کنید:"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [p_btn("ثبت کد هدیه الماس", callback_data="enter_gift_code", style="success", emoji_key="gift")],
+                [p_btn("🎡 چرخش گردونه رایگان (۱ تا ۴۰ الماس)", callback_data="spin:free_wheel", style="primary", emoji_key="sparkles")],
+                [p_btn("🎁 ثبت کد هدیه الماس", callback_data="enter_gift_code", style="success", emoji_key="gift")],
                 [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
             ])
         )
@@ -2582,32 +2847,34 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data == "menu:help_guide":
         act_c = get_setting("activation_cost", "30")
         hr_c = get_setting("hourly_cost", "3")
-        ref_r = get_setting("referral_reward", "5")
         ton_r = get_setting("ton_per_diamond", "0.0005")
         min_tr = get_setting("min_transfer_diamonds", "50")
         extra_note = get_setting("help_extra_note", "")
 
         help_text = p_text(
             f"📚 <b>راهنمای جامع ربات و قابلیت‌های گروهی «سلف دارک | Self Dark»</b>\n\n"
-            f"🌑 <b>۱. نحوه فعال‌سازی سلف دارک:</b>\n"
-            f"• ابتدا از داشتن حداقل <b>{act_c} الماس</b> در حساب خود مطمئن شوید.\n"
-            f"• وارد بخش <b>«🚀 فعالسازی و اتصال سلف دارک»</b> شوید و شماره و کد ۵ رقمی تلگرام را وارد کنید.\n\n"
-            f"💎 <b>۲. سیستم الماس، انتقال و کارمزد:</b>\n"
+            f"🌑 <b>۱. نحوه فعال‌سازی سلف دارک و هدیه ورود:</b>\n"
+            f"• هر کاربری در اولین ورود به ربات <b>۶۰ الماس هدیه رایگان</b> دریافت می‌کند.\n"
             f"• هزینه فعال‌سازی اولیه سلف: <b>{act_c} الماس</b> | هزینه ساعتی: <b>{hr_c} الماس</b>\n"
-            f"• خرید با TON: هر الماس <b>{ton_r} TON</b> | کارت به کارت: {get_setting('rial_support_id', '@kanfingfreesup')}\n"
-            f"• انتقال الماس: حداقل انتقال <b>{min_tr} الماس</b> با <b>۱۰٪ کارمزد</b> که از انتقال‌دهنده کسر می‌شود.\n\n"
-            f"👥 <b>۳. راهنمای کامل قابلیت‌های گروهی (Group Features):</b>\n"
-            f"• <b>مشاهده موجودی در گروه:</b> کافی است در گروه کلمه <code>موجودی</code> را بفرستید تا موجودی الماس شما داخل یک <b>دکمه شیشه‌ای آبی رنگ</b> نمایش داده شود.\n"
-            f"• <b>ساخت بازی دو نفره شرطی:</b> در گروه بنویسید <code>بازی [مبلغ]</code> (مثال: <code>بازی 60</code>). حداقل مبلغ شرط <b>۱۵ الماس</b> است. یک بازی با دکمه شیشه‌ای رنگی ساخته می‌شود که فقط خود شما و ۱ نفر دیگر می‌توانید شرکت کنید؛ به محض ورود نفر دوم، ربات به صورت کاملاً تصادفی برنده را انتخاب کرده و <b>۲ برابر مبلغ شرط</b> را به برنده جایزه می‌دهد!\n"
-            f"• <b>انتقال الماس با ریپلای در گروه:</b> روی پیام هر کاربری در گروه ریپلای کنید و بنویسید <code>انتقال [مبلغ]</code> (مثال: <code>انتقال 50</code>)؛ الماس بلافاصله با کسر ۱۰٪ کارمزد از حساب شما به حساب او منتقل شده و در پیوی ربات هم برایش نوتیفیکیشن ارسال می‌شود.\n\n"
-            f"🥇 <b>۴. کامنت اول، عضویت اجباری پیوی، قرعه‌کشی و پنل مرکزی:</b>\n"
-            f"• <b>کامنت اول خودکار:</b> در گروهی که به کانال متصل است عبارت <code>تنظیم کامنت اول</code> را بفرستید؛ به محض انتشار پست جدید در کانال، کلمه کامنت اول شما به همراه امضای <code>Self Dark</code> زیر پست ارسال می‌شود (قابل تغییر از بخش قابلیت‌های سلف).\n"
-            f"• <b>عضویت اجباری پیوی:</b> از بخش قابلیت‌های سلف تا حداکثر ۳ کانال (که ربات در آن‌ها ادمین است) ثبت کنید تا هر کسی در پیوی پیام داد و عضو نبود، پیامش فوراً حذف شده و دکمه شیشه‌ای کانال‌ها و بررسی عضویت برایش ارسال شود.\n"
-            f"• <b>ساخت قرعه‌کشی و دکمه شیشه‌ای کانال:</b> از بخش قابلیت‌های سلف می‌توانید قرعه‌کشی زمان‌دار با شمارنده زنده شرکت‌کنندگان و انتخاب خودکار برندگان یا پست شیشه‌ای رنگی در کانال منتشر کنید.\n"
-            f"• <b>پنل مرکزی (آخرین قابلیت سلف):</b> نمایش گزارش کامل تمام فعالیت‌های ۲۴ ساعت گذشته اکانت شما (پیام‌های گروه، پیوی، استارت ربات‌ها و...).\n\n"
-            f"📣 <b>۵. تبچی هوشمند و دستورات سلف:</b>\n"
-            f"• ثبت گروه در تبچی با <code>تنظیم چت</code> و حذف با <code>حذف چت</code>\n"
-            f"• دستورات سلف: <code>.ping</code> | <code>.stats</code> | <code>.id</code> | <code>.tr</code> | <code>.sum</code> | <code>.calc</code> | <code>.font</code> | <code>.del</code>\n\n"
+            f"• وارد بخش <b>«🚀 فعالسازی و اتصال سلف دارک»</b> شوید و شماره و کد ۵ رقمی تلگرام را وارد کنید.\n\n"
+            f"🏅 <b>۲. سیستم لول‌بندی کاربران (لول ۱ تا ۵) و پاداش زیرمجموعه:</b>\n"
+            f"• <b>لول ۱ (شروع همه کاربران):</b> پاداش هر زیرمجموعه <b>۵ الماس</b>\n"
+            f"• <b>لول ۲ (رسیدن موجودی به ۱,۵۰۰ الماس):</b> پاداش هر زیرمجموعه <b>۲۰ الماس</b>\n"
+            f"• <b>لول ۳ (رسیدن موجودی به ۳,۰۰۰ الماس):</b> پاداش هر زیرمجموعه <b>۴۰ الماس</b>\n"
+            f"• <b>لول ۴ (رسیدن موجودی به ۶,۰۰۰ الماس):</b> دریافت <b>۴۰۰ الماس هدیه ارتقا</b> + پاداش هر زیرمجموعه <b>۸۰ الماس</b>\n"
+            f"• <b>لول ۵ (رسیدن موجودی به ۱۰,۰۰۰ الماس — لول آخر):</b> دریافت <b>۱,۰۰۰ الماس هدیه ارتقا</b> + پاداش هر زیرمجموعه <b>۱۵۰ الماس</b>\n\n"
+            f"🎡 <b>۳. گردونه شانس رایگان روزانه (۱ تا ۴۰ الماس):</b>\n"
+            f"• در بخش <b>«🎁 هدیه روزانه و کد هدیه»</b> علاوه بر هدیه روزانه، هر <b>۲۴ ساعت یک‌بار</b> می‌توانید <b>گردونه رایگان</b> را بچرخانید و به صورت تصادفی بین <b>۱ تا ۴۰ الماس</b> برنده شوید!\n\n"
+            f"👥 <b>۴. راهنمای کامل قابلیت‌های گروهی و چالش ۳۰۰ بازی = ۲۰۰ الماس:</b>\n"
+            f"• <b>مشاهده موجودی در گروه:</b> کلمه <code>موجودی</code> را در گروه بفرستید تا موجودی الماس شما در دکمه شیشه‌ای آبی نمایش داده شود.\n"
+            f"• <b>ساخت بازی دو نفره شرطی:</b> در گروه بنویسید <code>بازی [مبلغ]</code> (حداقل <b>۱۵ الماس</b>، مثال: <code>بازی 60</code>). با ورود نفر دوم، برنده به صورت تصادفی انتخاب شده و <b>۲ برابر مبلغ شرط</b> جایزه می‌گیرد!\n"
+            f"• 🏆 <b>چالش ویژه ۳۰۰ بازی گروهی در کمتر از ۲۴ ساعت:</b> اگر هر کاربری در گروه در کمتر از <b>۲۴ ساعت، ۳۰۰ بازی</b> انجام دهد، بلافاصله <b>۲۰۰ الماس هدیه رایگان</b> به حسابش واریز می‌شود!\n"
+            f"• <b>انتقال الماس با ریپلای در گروه:</b> روی پیام فرد ریپلای کنید و بنویسید <code>انتقال [مبلغ]</code> (حداقل <b>{min_tr} الماس</b> با <b>۱۰٪ کارمزد</b>).\n\n"
+            f"🥇 <b>۵. کامنت اول، عضویت اجباری پیوی، چالش لایکی، قرعه‌کشی و پنل مرکزی:</b>\n"
+            f"• <b>کامنت اول خودکار:</b> ارسال <code>تنظیم کامنت اول</code> در گروه متصل به کانال.\n"
+            f"• <b>عضویت اجباری پیوی:</b> ریپلای محترمانه روی اولین پیام و حذف پیام‌های بعدی افراد غیرعضو به همراه دکمه شیشه‌ای واقعی.\n"
+            f"• <b>ساخت چالش لایکی، قرعه‌کشی و دکمه شیشه‌ای کانال:</b> قابل استفاده از بخش قابلیت‌های سلف دارک.\n"
+            f"• <b>پنل مرکزی و کتابچه توضیحات قابلیت‌ها:</b> گزارش ۲۴ ساعته اکانت و آموزش کامل هر ۴۶ قابلیت سلف دارک.\n\n"
             f"{html.escape(extra_note)}"
         )
         kb = InlineKeyboardMarkup([
@@ -2619,6 +2886,61 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
         ])
         await query.edit_message_text(help_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def spin_free_wheel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر گردونه شانس رایگان هر ۲۴ ساعت یک‌بار (بین ۱ تا ۴۰ الماس با احتمال بیشتر برای اعداد زیر ۱۰)"""
+    query = update.callback_query
+    user = update.effective_user
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
+
+    now_dt = datetime.now()
+    if db_user["last_wheel_spin"]:
+        try:
+            last_dt = datetime.fromisoformat(db_user["last_wheel_spin"])
+            diff = now_dt - last_dt
+            if diff < timedelta(hours=24):
+                rem_sec = int((timedelta(hours=24) - diff).total_seconds())
+                rem_h = rem_sec // 3600
+                rem_m = (rem_sec % 3600) // 60
+                await query.answer(
+                    f"⏳ شما در ۲۴ ساعت گذشته گردونه را چرخانده‌اید!\nزمان باقی‌مانده تا چرخش بعدی: {rem_h} ساعت و {rem_m} دقیقه",
+                    show_alert=True
+                )
+                return
+        except Exception:
+            pass
+
+    prize_diamonds = spin_weighted_wheel_reward()
+    now_iso = now_dt.isoformat()
+
+    with closing(get_conn()) as conn, conn:
+        conn.execute(
+            "UPDATE users SET diamonds = diamonds + ?, last_wheel_spin = ? WHERE user_id=?",
+            (prize_diamonds, now_iso, user.id)
+        )
+
+    check_and_upgrade_user_level(user.id)
+    updated_user = get_or_create_user(user.id, user.username, user.first_name)
+    lvl_info = get_user_level_info(user.id)
+
+    await query.answer(f"🎡 تبریک! گردونه چرخید و {prize_diamonds} الماس برنده شدید!", show_alert=True)
+    await query.edit_message_text(
+        p_text(
+            f"🎡 <b>نتیجه چرخش گردونه رایگان سلف دارک</b>\n\n"
+            f"🎉 تبریک <b>{html.escape(user.first_name)}</b> عزیز!\n"
+            f"💎 جایزه تصادفی شما از گردونه: <b>+{prize_diamonds:,} الماس رایگان</b>\n"
+            f"💰 موجودی جدید شما: <b>{updated_user['diamonds']:,} الماس</b>\n"
+            f"🏅 سطح فعلی شما: <b>{lvl_info['title']}</b>\n\n"
+            f"⏰ شما <b>۲۴ ساعت دیگر</b> مجدداً می‌توانید گردونه رایگان را بچرخانید!"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [p_btn("🎁 بازگشت به بخش هدیه روزانه", callback_data="menu:daily_gift", style="primary", emoji_key="gift")],
+            [p_btn("👤 مشاهده حساب کاربری و لول", callback_data="menu:profile", style="success", emoji_key="crown")],
+            [p_btn("بازگشت به منوی اصلی", callback_data="menu:main", style="danger", emoji_key="fire")]
+        ])
+    )
 
 # ====================================================================
 #  مدیریت قابلیت‌های سلف دارک (روشن/خاموش، تغییر مقادیر و پنل مرکزی)
@@ -3884,6 +4206,7 @@ async def gift_code_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.execute("UPDATE gift_codes SET used_count = ? WHERE code=?", (new_used, actual_code))
             cap_note = f"👥 ظرفیت باقی‌مانده کد: <b>{max_cap - new_used} نفر</b> (استفاده شده: {new_used}/{max_cap})"
 
+    check_and_upgrade_user_level(user.id)
     updated_u = get_or_create_user(user.id)
     await update.message.reply_text(
         p_text(
@@ -6820,25 +7143,54 @@ async def group_callbacks_handler(update: Update, context: ContextTypes.DEFAULT_
                     (user.id, user.first_name or "کاربر", winner_id, gid)
                 )
 
+        # بررسی ارتقای لول برنده و ثبت بازی برای هر دو بازیکن جهت چالش ۳۰۰ بازی در کمتر از ۲۴ ساعت = ۲۰۰ الماس هدیه
+        check_and_upgrade_user_level(winner_id)
+        c_won_300, c_cnt_24h = record_group_game_and_check_300_challenge(game["creator_id"], gid)
+        o_won_300, o_cnt_24h = record_group_game_and_check_300_challenge(user.id, gid)
+
+        challenge_bonus_lines = ""
+        if c_won_300:
+            challenge_bonus_lines += f"\n🏆 <b>تبریک ویژه!</b> بازیکن <b>{html.escape(game['creator_name'])}</b> به <b>۳۰۰ بازی در کمتر از ۲۴ ساعت</b> رسید و <b>+۲۰۰ الماس هدیه</b> دریافت کرد!"
+            try:
+                await context.bot.send_message(
+                    chat_id=game["creator_id"],
+                    text=p_text("🏆 <b>تبریک! تکمیل چالش ۳۰۰ بازی گروهی در کمتر از ۲۴ ساعت!</b>\n\n💎 جایزه ویژه شما: <b>+۲۰۰ الماس رایگان</b> به حساب شما اضافه شد!"),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+        if o_won_300:
+            challenge_bonus_lines += f"\n🏆 <b>تبریک ویژه!</b> بازیکن <b>{html.escape(user.first_name or 'کاربر')}</b> به <b>۳۰۰ بازی در کمتر از ۲۴ ساعت</b> رسید و <b>+۲۰۰ الماس هدیه</b> دریافت کرد!"
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=p_text("🏆 <b>تبریک! تکمیل چالش ۳۰۰ بازی گروهی در کمتر از ۲۴ ساعت!</b>\n\n💎 جایزه ویژه شما: <b>+۲۰۰ الماس رایگان</b> به حساب شما اضافه شد!"),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
         await query.answer(f"🎉 برنده مشخص شد: {winner_name}!", show_alert=True)
         res_kb = InlineKeyboardMarkup([
             [
                 p_btn(f"🏆 برنده: {winner_name[:20]} (+{prize:,} الماس)", callback_data=f"grpbal:{winner_id}", style="success", emoji_key="crown")
             ],
             [
-                p_btn(f"🎮 بازیکن ۱: {game['creator_name'][:15]}", callback_data=f"grpbal:{game['creator_id']}", style="primary"),
-                p_btn(f"🎮 بازیکن ۲: {(user.first_name or 'کاربر')[:15]}", callback_data=f"grpbal:{user.id}", style="primary"),
+                p_btn(f"🎮 بازیکن ۱: {game['creator_name'][:15]} ({c_cnt_24h}/300)", callback_data=f"grpbal:{game['creator_id']}", style="primary"),
+                p_btn(f"🎮 بازیکن ۲: {(user.first_name or 'کاربر')[:15]} ({o_cnt_24h}/300)", callback_data=f"grpbal:{user.id}", style="primary"),
             ]
         ])
         await query.edit_message_text(
             p_text(
                 f"🎉 <b>نتیجه بازی دو نفره الماس مشخص شد!</b>\n\n"
-                f"👤 بازیکن اول: <b>{html.escape(game['creator_name'])}</b>\n"
-                f"👤 بازیکن دوم: <b>{html.escape(user.first_name or 'کاربر')}</b>\n"
+                f"👤 بازیکن اول: <b>{html.escape(game['creator_name'])}</b> (بازی ۲۴ ساعت اخیر: <b>{c_cnt_24h}/300</b>)\n"
+                f"👤 بازیکن دوم: <b>{html.escape(user.first_name or 'کاربر')}</b> (بازی ۲۴ ساعت اخیر: <b>{o_cnt_24h}/300</b>)\n"
                 f"💎 مبلغ شرط هر نفر: <b>{bet:,} الماس</b>\n\n"
                 f"👑 <b>برنده خوش‌شانس (انتخاب تصادفی):</b> <b>{html.escape(winner_name)}</b> (<code>{winner_id}</code>)\n"
                 f"💰 <b>جایزه دریافتی (۲ برابر شرط):</b> <b>{prize:,} الماس</b>\n"
                 f"💔 بازنده: <b>{html.escape(loser_name)}</b>"
+                f"{challenge_bonus_lines}"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=res_kb
@@ -7173,6 +7525,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_ton_order_action_callback, pattern="^tonadm:"))
     app.add_handler(CallbackQueryHandler(admin_page_callback, pattern="^admin:page:"))
     app.add_handler(CallbackQueryHandler(admin_remove_fch_callback, pattern="^rmfch:"))
+    app.add_handler(CallbackQueryHandler(spin_free_wheel_callback, pattern="^spin:free_wheel$"))
     app.add_handler(CallbackQueryHandler(menu_router_callback, pattern="^(menu:|buy:rial)"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_commands_handler))
