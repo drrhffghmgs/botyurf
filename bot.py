@@ -5849,14 +5849,6 @@ async def pv_force_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return PVFORCE_WAIT_CHANNEL
 
-def normalize_channel_identifier(raw_input: str) -> str:
-    s = (raw_input or "").strip()
-    s = re.sub(r"^https?://t\.me/", "@", s)
-    s = re.sub(r"^t\.me/", "@", s)
-    if not s.startswith("@") and not s.startswith("-100") and not s.lstrip("-").isdigit():
-        s = "@" + s
-    return s
-
 async def pv_force_add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ch_identifier = normalize_channel_identifier(update.message.text or "")
@@ -7712,4 +7704,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
