@@ -873,26 +873,116 @@ def save_user_features(user_id: int, feats: dict):
         )
 
 # ====================================================================
-#  جوین اجباری و تایید زیرمجموعه (هر زیرمجموعه = ۵ الماس)
+#  جوین اجباری و تایید زیرمجموعه (با دکمه‌های شیشه‌ای رنگی و بررسی عضویت)
 # ====================================================================
+
+def normalize_channel_identifier(raw_input: str, fallback_link: str = "") -> str:
+    """تبدیل هر نوع ورودی آیدی یا لینک کانال به فرمت استاندارد @username یا -100... برای get_chat_member"""
+    s = (raw_input or "").strip()
+    s = s.split("?")[0].rstrip("/")
+    # اگر لینک دعوت خصوصی باشد و در fallback_link یوزرنیم عمومی باشد
+    if ("+" in s or "joinchat/" in s) and fallback_link:
+        fb = (fallback_link or "").strip().split("?")[0].rstrip("/")
+        fb = re.sub(r"^https?://(www\.)?(t\.me|telegram\.me)/", "", fb, flags=re.IGNORECASE)
+        fb = re.sub(r"^(t\.me|telegram\.me)/", "", fb, flags=re.IGNORECASE)
+        if fb and not fb.startswith("+") and not fb.startswith("joinchat/"):
+            s = fb
+
+    s = re.sub(r"^https?://(www\.)?(t\.me|telegram\.me)/", "@", s, flags=re.IGNORECASE)
+    s = re.sub(r"^(t\.me|telegram\.me)/", "@", s, flags=re.IGNORECASE)
+    if s.startswith("@+"):
+        s = s[1:]
+    if not s:
+        return ""
+    if s.lstrip("-").isdigit():
+        # اگر آیدی عددی کانال بدون -100 وارد شده باشد
+        if not s.startswith("-") and len(s) >= 9:
+            return f"-100{s}"
+        return s
+    if not s.startswith("@") and not s.startswith("+") and "joinchat" not in s:
+        s = "@" + s.lstrip("@")
+    return s
+
+def normalize_tg_channel_url(raw_link: str, raw_channel_id: str = "") -> str:
+    """تبدیل هر نوع آیدی یا لینک کانال به URL معتبر https://t.me/... برای دکمه شیشه‌ای تلگرام"""
+    candidate = (raw_link or "").strip()
+    ch_id_clean = (raw_channel_id or "").strip()
+
+    def _to_valid_url(val: str) -> str:
+        v = (val or "").strip()
+        if not v or " " in v:
+            return ""
+        if re.match(r"^https://", v, flags=re.IGNORECASE):
+            return v
+        if re.match(r"^http://", v, flags=re.IGNORECASE):
+            return re.sub(r"^http://", "https://", v, flags=re.IGNORECASE)
+        if re.match(r"^tg://", v, flags=re.IGNORECASE):
+            return v
+        if re.match(r"^(www\.)?(t\.me|telegram\.me)/", v, flags=re.IGNORECASE):
+            v = re.sub(r"^www\.", "", v, flags=re.IGNORECASE)
+            return f"https://{v}"
+        if v.startswith("+"):
+            return f"https://t.me/{v}"
+        if v.startswith("@"):
+            uname = v.lstrip("@").strip()
+            if re.match(r"^[A-Za-z0-9_]{3,64}$", uname):
+                return f"https://t.me/{uname}"
+        if re.match(r"^[A-Za-z0-9_]{4,64}$", v):
+            return f"https://t.me/{v}"
+        return ""
+
+    url = _to_valid_url(candidate)
+    if not url:
+        url = _to_valid_url(ch_id_clean)
+    if not url:
+        return "https://t.me/"
+    return url
 
 def get_force_channels():
     with closing(get_conn()) as conn:
         return conn.execute("SELECT * FROM force_channels ORDER BY id ASC").fetchall()
 
 async def check_user_joined_all(bot, user_id: int) -> list:
-    if is_admin(user_id):
-        return []
     channels = get_force_channels()
+    if not channels:
+        return []
     not_joined = []
     for ch in channels:
-        ch_id = ch["channel_id"].strip()
+        ch_dict = dict(ch)
+        raw_id = (ch_dict.get("channel_id") or "").strip()
+        raw_link = (ch_dict.get("channel_link") or "").strip()
+        ch_id = normalize_channel_identifier(raw_id, raw_link)
+        norm_url = normalize_tg_channel_url(raw_link, ch_id)
+        ch_dict["channel_id"] = ch_id
+        ch_dict["channel_link"] = norm_url
+
+        # اگر لینک کانال هنوز کامل نبود، سعی می‌کنیم از خود تلگرام لینک کانال را بگیریم
+        if norm_url == "https://t.me/" and ch_id:
+            try:
+                chat_obj = await bot.get_chat(chat_id=ch_id)
+                if getattr(chat_obj, "username", None):
+                    norm_url = f"https://t.me/{chat_obj.username}"
+                elif getattr(chat_obj, "invite_link", None):
+                    norm_url = chat_obj.invite_link
+                if norm_url != "https://t.me/":
+                    ch_dict["channel_link"] = norm_url
+                    with closing(get_conn()) as conn, conn:
+                        conn.execute("UPDATE force_channels SET channel_link=? WHERE id=?", (norm_url, ch_dict["id"]))
+            except Exception:
+                pass
+
         try:
             member = await bot.get_chat_member(chat_id=ch_id, user_id=user_id)
-            if member.status in ["left", "kicked"]:
-                not_joined.append(ch)
+            m_status = getattr(member, "status", "")
+            is_mem = getattr(member, "is_member", True)
+            if m_status in ("left", "kicked", "banned") or (m_status == "restricted" and not is_mem):
+                not_joined.append(ch_dict)
         except Exception as e:
-            logger.warning(f"خطا در بررسی عضویت کانال {ch_id}: {e}")
+            err_s = str(e).lower()
+            logger.warning(f"خطا در بررسی عضویت کانال {ch_id} برای کاربر {user_id}: {e}")
+            # اگر خطا مربوط به عدم عضویت کاربر باشد، کانال را در لیست عضو نشده‌ها قرار بده
+            if any(k in err_s for k in ("user not found", "participant", "not a member", "peer_id_invalid")):
+                not_joined.append(ch_dict)
     return not_joined
 
 async def verify_referral_if_eligible(bot, user_id: int):
@@ -933,16 +1023,89 @@ async def verify_referral_if_eligible(bot, user_id: int):
         except Exception:
             pass
 
-def build_force_join_keyboard(not_joined_channels: list) -> InlineKeyboardMarkup:
+def build_force_join_keyboard(not_joined_channels: list, user_id: int = None, plain_fallback: bool = False) -> InlineKeyboardMarkup:
     rows = []
     for idx, ch in enumerate(not_joined_channels, start=1):
+        ch_title = (ch["title"] if "title" in ch.keys() else "کانال اسپانسر") if hasattr(ch, "keys") else ch.get("title", "کانال اسپانسر")
+        ch_id = (ch["channel_id"] if "channel_id" in ch.keys() else "") if hasattr(ch, "keys") else ch.get("channel_id", "")
+        ch_link = (ch["channel_link"] if "channel_link" in ch.keys() else "") if hasattr(ch, "keys") else ch.get("channel_link", "")
+        valid_url = normalize_tg_channel_url(ch_link, ch_id)
+        btn_text = f"📢 عضویت در {ch_title} ({idx})"
+        if plain_fallback:
+            rows.append([InlineKeyboardButton(btn_text, url=valid_url)])
+        else:
+            rows.append([
+                p_btn(btn_text, url=valid_url, style="primary", emoji_key="megaphone")
+            ])
+
+    if plain_fallback:
+        rows.append([InlineKeyboardButton("✅ عضو شدم / بررسی عضویت", callback_data="check_join")])
+        if user_id and is_admin(user_id):
+            rows.append([InlineKeyboardButton("👑 ورود مستقیم به پنل مدیریت (ادمین)", callback_data="admin:page:0")])
+    else:
         rows.append([
-            p_btn(f"عضویت در {ch['title']} ({idx})", url=ch["channel_link"], style="primary", emoji_key="megaphone")
+            p_btn("✅ عضو شدم / بررسی عضویت", callback_data="check_join", style="success", emoji_key="check")
         ])
-    rows.append([
-        p_btn("عضو شدم / بررسی عضویت", callback_data="check_join", style="success", emoji_key="check")
-    ])
+        if user_id and is_admin(user_id):
+            rows.append([
+                p_btn("👑 ورود مستقیم به پنل مدیریت (ادمین)", callback_data="admin:page:0", style="danger", emoji_key="crown")
+            ])
     return InlineKeyboardMarkup(rows)
+
+async def send_force_join_prompt(update: Update, not_joined: list, db_user, is_edit: bool = False):
+    """ارسال تضمینی پیام و دکمه‌های شیشه‌ای رنگی جوین اجباری + دکمه شیشه‌ای بررسی عضویت"""
+    user = update.effective_user
+    uid = user.id if user else None
+    try:
+        bonus_preview = int(get_setting("welcome_bonus", "60") or "60")
+    except Exception:
+        bonus_preview = 60
+
+    claimed = 0
+    try:
+        claimed = int(dict(db_user).get("welcome_gift_claimed") or 0) if db_user else 0
+    except Exception:
+        claimed = 0
+
+    gift_hint = (
+        f"\n\n🎁 پس از عضویت در کانال‌ها و زدن دکمه تایید، <b>{bonus_preview} الماس هدیه ورود</b> به حساب شما اضافه خواهد شد!"
+        if not claimed else ""
+    )
+    raw_msg = (
+        f"👋 سلام <b>{html.escape(user.first_name if user and user.first_name else 'کاربر')}</b> عزیز!\n\n"
+        f"📢 برای استفاده از ربات <b>سلف دارک (Self Dark)</b>، ابتدا از طریق <b>دکمه‌های شیشه‌ای رنگی زیر</b> در کانال‌های ربات عضو شوید و سپس روی دکمه <b>«✅ عضو شدم / بررسی عضویت»</b> بزنید:{gift_hint}"
+    )
+
+    try:
+        if is_edit and update.callback_query:
+            await update.callback_query.edit_message_text(
+                p_text(raw_msg),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_force_join_keyboard(not_joined, user_id=uid, plain_fallback=False),
+            )
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                p_text(raw_msg),
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_force_join_keyboard(not_joined, user_id=uid, plain_fallback=False),
+            )
+    except Exception as e:
+        logger.warning(f"Force join styled send fallback triggered: {e}")
+        try:
+            if is_edit and update.callback_query:
+                await update.callback_query.edit_message_text(
+                    raw_msg,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_force_join_keyboard(not_joined, user_id=uid, plain_fallback=True),
+                )
+            elif update.effective_message:
+                await update.effective_message.reply_text(
+                    raw_msg,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_force_join_keyboard(not_joined, user_id=uid, plain_fallback=True),
+                )
+        except Exception as e2:
+            logger.error(f"Force join final fallback error: {e2}")
 
 # ====================================================================
 #  موتور واقعی اجرای سلف دارک (Telethon Worker) + تبچی هوشمند
@@ -2492,18 +2655,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
-        bonus_preview = int(get_setting("welcome_bonus", "60") or "60")
-        gift_hint = (
-            f"\n🎁 پس از عضویت در کانال‌ها و زدن دکمه تایید، <b>{bonus_preview} الماس هدیه ورود</b> به حساب شما اضافه خواهد شد!"
-            if not db_user["welcome_gift_claimed"] else ""
-        )
-        await update.message.reply_text(
-            p_text(
-                f"👋 سلام! برای ورود به ربات <b>سلف دارک (Self Dark)</b>، ابتدا در کانال‌های زیر عضو شوید و سپس دکمه <b>«✅ عضو شدم»</b> را بزنید:{gift_hint}"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_force_join_keyboard(not_joined)
-        )
+        await send_force_join_prompt(update, not_joined, db_user, is_edit=False)
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
@@ -2531,10 +2683,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-    get_or_create_user(user.id, user.username, user.first_name)
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
-        await query.answer("⚠️ هنوز در تمام کانال‌ها عضو نشده‌اید!", show_alert=True)
+        await query.answer("⚠️ هنوز در تمام کانال‌ها عضو نشده‌اید! ابتدا عضو شوید و دوباره روی بررسی عضویت بزنید.", show_alert=True)
+        await send_force_join_prompt(update, not_joined, db_user, is_edit=True)
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
@@ -2567,11 +2720,7 @@ async def menu_router_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     not_joined = await check_user_joined_all(context.bot, user.id)
     if not_joined:
         await query.answer("⚠️ ابتدا در کانال‌های اسپانسر عضو شوید.", show_alert=True)
-        await query.edit_message_text(
-            p_text("📢 لطفاً ابتدا در کانال‌های زیر عضو شوید:"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_force_join_keyboard(not_joined)
-        )
+        await send_force_join_prompt(update, not_joined, db_user, is_edit=True)
         return
 
     await verify_referral_if_eligible(context.bot, user.id)
@@ -4985,23 +5134,50 @@ async def admin_remove_fch_callback(update: Update, context: ContextTypes.DEFAUL
     await admin_page_callback(update, context)
 
 async def admin_add_fch_step1(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_fch_id"] = update.message.text.strip()
-    await update.message.reply_text(p_text("🔗 <b>مرحله ۲ از ۳: لینک عضویت کانال</b> را بفرستید:"), parse_mode=ParseMode.HTML)
+    raw_id = (update.message.text or "").strip()
+    context.user_data["new_fch_id"] = raw_id
+    await update.message.reply_text(
+        p_text("🔗 <b>مرحله ۲ از ۳: لینک عضویت کانال</b> (مثلاً <code>https://t.me/MyChannel</code> یا <code>@MyChannel</code>) را بفرستید:"),
+        parse_mode=ParseMode.HTML
+    )
     return ADM_WAIT_FCH_LINK
 
 async def admin_add_fch_step2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_fch_link"] = update.message.text.strip()
+    context.user_data["new_fch_link"] = (update.message.text or "").strip()
     await update.message.reply_text(p_text("🏷 <b>مرحله ۳ از ۳: عنوان دکمه کانال</b> را بفرستید:"), parse_mode=ParseMode.HTML)
     return ADM_WAIT_FCH_TITLE
 
 async def admin_add_fch_step3(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    title = update.message.text.strip()
-    ch_id = context.user_data.get("new_fch_id")
-    ch_link = context.user_data.get("new_fch_link")
+    title = (update.message.text or "").strip() or "کانال اسپانسر"
+    raw_id = context.user_data.get("new_fch_id", "")
+    raw_link = context.user_data.get("new_fch_link", "")
+    ch_id = normalize_channel_identifier(raw_id, raw_link)
+    ch_link = normalize_tg_channel_url(raw_link, ch_id)
+
+    try:
+        chat_obj = await context.bot.get_chat(chat_id=ch_id)
+        if getattr(chat_obj, "username", None) and ch_link == "https://t.me/":
+            ch_link = f"https://t.me/{chat_obj.username}"
+        elif getattr(chat_obj, "invite_link", None) and ch_link == "https://t.me/":
+            ch_link = chat_obj.invite_link
+    except Exception:
+        pass
+
     with closing(get_conn()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO force_channels (channel_id, channel_link, title) VALUES (?, ?, ?)", (ch_id, ch_link, title))
+        conn.execute(
+            "INSERT OR REPLACE INTO force_channels (channel_id, channel_link, title) VALUES (?, ?, ?)",
+            (ch_id, ch_link, title)
+        )
     page = context.user_data.get("adm_page", 0)
-    await update.message.reply_text(p_text(f"✅ کانال <b>{html.escape(title)}</b> اضافه شد!"), parse_mode=ParseMode.HTML, reply_markup=build_admin_keyboard(page))
+    await update.message.reply_text(
+        p_text(
+            f"✅ کانال جوین اجباری <b>{html.escape(title)}</b> با موفقیت ثبت شد!\n"
+            f"🆔 آیدی بررسی عضویت: <code>{html.escape(ch_id)}</code>\n"
+            f"🔗 لینک دکمه شیشه‌ای: <code>{html.escape(ch_link)}</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_admin_keyboard(page)
+    )
     return ConversationHandler.END
 
 # ---- مراحل الماس همگانی با متن دلخواه (۲ مرحله‌ای) ----
